@@ -2,6 +2,7 @@ use indexmap::IndexMap;
 
 use mago_algebra::clause::Clause;
 use mago_algebra::find_satisfying_assignments;
+use mago_atom::AtomSet;
 use mago_atom::atom;
 
 use mago_codex::ttype::get_literal_string;
@@ -21,6 +22,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::var_has_root;
 use crate::error::AnalysisError;
+use crate::expression::instantiation::analyze_anonymous_class_constructor;
 use crate::formula::get_formula;
 use crate::plugin::ExpressionHookResult;
 use crate::plugin::context::HookContext;
@@ -118,6 +120,15 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Expression<'arena> {
                 let Some(class_like_metadata) = context.codebase.get_anonymous_class(self.span()) else {
                     return Ok(());
                 };
+
+                analyze_anonymous_class_constructor(
+                    context,
+                    block_context,
+                    artifacts,
+                    class_like_metadata,
+                    anonymous_class.argument_list.as_ref(),
+                    anonymous_class.span(),
+                )?;
 
                 analyze_class_like(
                     context,
@@ -308,13 +319,13 @@ pub fn find_expression_logic_issues<'ctx, 'arena>(
     expression_clauses = expression_clauses
         .into_iter()
         .map(|c| {
-            let keys = c.possibilities.keys().copied().collect::<Vec<mago_atom::Atom>>();
+            let keys: AtomSet = c.possibilities.keys().copied().collect();
 
             mixed_var_ids.retain(|i| !keys.contains(i));
 
-            for key in &keys {
+            for key in keys {
                 for mixed_var_id in &mixed_var_ids {
-                    if var_has_root(*key, *mixed_var_id) {
+                    if var_has_root(key, *mixed_var_id) {
                         return Clause::new(
                             IndexMap::default(),
                             expression.span(),

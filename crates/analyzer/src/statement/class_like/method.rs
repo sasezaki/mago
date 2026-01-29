@@ -58,6 +58,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
             return Ok(());
         };
 
+        // Skip duplicate methods; semantics reports the error
+        if method_metadata.span != self.span() {
+            return Ok(());
+        }
+
         let mut scope = ScopeContext::new();
         scope.set_class_like(Some(class_like_metadata));
         scope.set_function_like(Some(method_metadata));
@@ -65,7 +70,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
 
         let mut method_block_context = BlockContext::new(scope, context.settings.register_super_globals);
 
-        method_block_context.collect_initializations = true;
+        method_block_context.flags.set_collect_initializations(true);
 
         analyze_function_like(
             context,
@@ -85,7 +90,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Method<'arena> {
 
         artifacts.method_calls_this_methods.insert(method_key, method_block_context.definitely_called_methods.clone());
 
-        if method_block_context.calls_parent_constructor {
+        if method_block_context.flags.calls_parent_constructor() {
             artifacts.method_calls_parent_constructor.insert(method_key, true);
         }
 

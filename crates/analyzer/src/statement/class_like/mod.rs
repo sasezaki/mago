@@ -51,6 +51,7 @@ use crate::plugin::context::HookContext;
 use crate::statement::attributes::AttributeTarget;
 use crate::statement::attributes::analyze_attributes;
 use crate::statement::class_like::method_signature::SignatureCompatibilityIssue;
+use crate::statement::function_like::report_undefined_type_references;
 use crate::utils::missing_type_hints;
 
 pub mod constant;
@@ -60,6 +61,31 @@ pub mod method;
 pub mod method_signature;
 pub mod override_attribute;
 pub mod property;
+pub mod unused_members;
+
+/// Reports a duplicate definition issue for class-like types.
+fn report_duplicate_definition(
+    context: &mut Context<'_, '_>,
+    title: &str,
+    kind: &str,
+    name: &str,
+    duplicate_span: Span,
+    original_span: Span,
+) {
+    context.collector.report_with_code(
+        IssueCode::DuplicateDefinition,
+        Issue::error(format!("{title} `{name}` is already defined elsewhere."))
+            .with_annotation(
+                Annotation::primary(duplicate_span).with_message(format!("Duplicate {kind} definition here")),
+            )
+            .with_annotation(Annotation::secondary(original_span).with_message(format!("Original {kind} defined here")))
+            .with_note("Each class, interface, trait, or enum must have a unique name within the same namespace.")
+            .with_note("The duplicate definition will be ignored during analysis.")
+            .with_help(
+                "Consider using namespaces to avoid naming conflicts, or remove one of the duplicate definitions.",
+            ),
+    );
+}
 
 /// Helper function to check if a child type is compatible with (contained by) a parent type.
 ///
@@ -309,6 +335,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
             return Ok(());
         };
 
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Class", "class", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
+
         // Call plugin on_enter_class hooks
         if context.plugin_registry.has_class_hooks() {
             let mut hook_context = HookContext::new(context.codebase, block_context, artifacts);
@@ -331,6 +362,25 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Class<'arena> {
 
         if context.settings.check_missing_override {
             override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        }
+
+        if context.settings.find_unused_definitions {
+            let unused_members = unused_members::check_unused_members_with_transitivity(
+                class_like_metadata.name,
+                self.span(),
+                class_like_metadata,
+                &artifacts.symbol_references,
+                context,
+            );
+
+            unused_members::check_write_only_properties(
+                class_like_metadata.name,
+                self.span(),
+                class_like_metadata,
+                &artifacts.symbol_references,
+                &unused_members,
+                context,
+            );
         }
 
         // Call plugin on_leave_class hooks
@@ -367,6 +417,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Interface<'arena> {
 
             return Ok(());
         };
+
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Interface", "interface", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
 
         // Call plugin on_enter_interface hooks
         if context.plugin_registry.has_interface_hooks() {
@@ -427,6 +482,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Trait<'arena> {
             return Ok(());
         };
 
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Trait", "trait", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
+
         // Call plugin on_enter_trait hooks
         if context.plugin_registry.has_trait_hooks() {
             let mut hook_context = HookContext::new(context.codebase, block_context, artifacts);
@@ -486,6 +546,11 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
             return Ok(());
         };
 
+        if class_like_metadata.span != self.span() {
+            report_duplicate_definition(context, "Enum", "enum", name, self.span(), class_like_metadata.span);
+            return Ok(());
+        }
+
         // Call plugin on_enter_enum hooks
         if context.plugin_registry.has_enum_hooks() {
             let mut hook_context = HookContext::new(context.codebase, block_context, artifacts);
@@ -508,6 +573,16 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Enum<'arena> {
 
         if context.settings.check_missing_override {
             override_attribute::check_override_attribute(class_like_metadata, self.members.as_slice(), context);
+        }
+
+        if context.settings.find_unused_definitions {
+            unused_members::check_unused_members_with_transitivity(
+                class_like_metadata.name,
+                self.span(),
+                class_like_metadata,
+                &artifacts.symbol_references,
+                context,
+            );
         }
 
         // Call plugin on_leave_enum hooks
@@ -759,6 +834,27 @@ pub(crate) fn analyze_class_like<'ctx, 'ast, 'arena>(
             ClassLikeMember::Property(property) => {
                 missing_type_hints::check_property_type_hint(context, class_like_metadata, property);
 
+                let property_names: Vec<Atom> = match property {
+                    Property::Plain(plain) => plain.items.iter().map(|item| atom(item.variable().name)).collect(),
+                    Property::Hooked(hooked) => {
+                        vec![atom(hooked.item.variable().name)]
+                    }
+                };
+
+                for property_name in property_names {
+                    if let Some(prop_meta) = class_like_metadata.properties.get(&property_name)
+                        && let Some(type_meta) = &prop_meta.type_metadata
+                    {
+                        report_undefined_type_references(context, type_meta);
+
+                        if type_meta.from_docblock
+                            && let Some(type_decl_meta) = &prop_meta.type_declaration_metadata
+                        {
+                            report_undefined_type_references(context, type_decl_meta);
+                        }
+                    }
+                }
+
                 property.analyze(context, &mut block_context, artifacts)?;
             }
             ClassLikeMember::EnumCase(enum_case) => {
@@ -900,6 +996,15 @@ fn check_class_like_extends<'ctx, 'arena>(
                         .with_annotation(Annotation::secondary(extended_class_span).with_message(format!("...but it extends `{extended_name}`, which is `readonly`")))
                         .with_note("A `readonly` class can only be extended by another `readonly` class.")
                         .with_help(format!("To resolve this, either make the `{using_name}` class `readonly`, or extend a different, non-readonly class.")),
+                );
+            } else if !extended_class_metadata.flags.is_readonly() && class_like_metadata.flags.is_readonly() {
+                context.collector.report_with_code(
+                    IssueCode::InvalidExtend,
+                    Issue::error(format!("Readonly class `{using_name}` cannot extend non-readonly class `{extended_name}`"))
+                        .with_annotation(Annotation::primary(using_class_span).with_message("This class is `readonly`..."))
+                        .with_annotation(Annotation::secondary(extended_class_span).with_message(format!("...but it extends `{extended_name}`, which is not `readonly`")))
+                        .with_note("A non-`readonly` class can only be extended by another non-`readonly` class.")
+                        .with_help(format!("To resolve this, either make the `{using_name}` class non-`readonly`, or extend a different, readonly class.")),
                 );
             }
 
@@ -1272,6 +1377,15 @@ fn check_template_parameters<'ctx>(
         let mut previous_extended_types: IndexMap<Atom, Vec<(GenericParent, TUnion)>, RandomState> =
             IndexMap::default();
 
+        for (template_name, _) in &parent_metadata.template_types {
+            if let Some(extended_type) = extended_parameters.get(template_name) {
+                previous_extended_types
+                    .entry(*template_name)
+                    .or_default()
+                    .push((GenericParent::ClassLike(parent_metadata.name), extended_type.clone()));
+            }
+        }
+
         for (template_name, template_type_map) in &parent_metadata.template_types {
             let Some(mut extended_type) = extended_parameters.get(template_name).cloned() else {
                 i += 1;
@@ -1370,7 +1484,7 @@ fn check_template_parameters<'ctx>(
                 previous_extended_types
                     .entry(*template_name)
                     .or_default()
-                    .push((GenericParent::ClassLike(class_like_metadata.name), extended_type));
+                    .push((GenericParent::ClassLike(parent_metadata.name), extended_type));
             } else {
                 let mut template_result = TemplateResult::new(previous_extended_types.clone(), Default::default());
                 let mut replaced_template_type = standin_type_replacer::replace(
@@ -1393,7 +1507,7 @@ fn check_template_parameters<'ctx>(
                     previous_extended_types
                         .entry(*template_name)
                         .or_default()
-                        .push((GenericParent::ClassLike(class_like_metadata.name), extended_type));
+                        .push((GenericParent::ClassLike(parent_metadata.name), extended_type));
                 } else {
                     let replaced_type_str = replaced_template_type.get_id();
 
@@ -1479,21 +1593,22 @@ fn check_abstract_method_signatures<'ctx>(
     for (method_name_atom, overridden_method_ids) in &class_like_metadata.overridden_method_ids {
         let method_name_str = method_name_atom.as_ref();
 
-        let Some(appearing_method_id) = class_like_metadata.appearing_method_ids.get(method_name_atom) else {
+        let Some(declaring_method_id) = class_like_metadata.declaring_method_ids.get(method_name_atom) else {
             continue;
         };
 
-        let appearing_fqcn_str = appearing_method_id.get_class_name().as_ref();
-        let appearing_method_opt = context.codebase.get_method(appearing_fqcn_str, method_name_str);
+        let declaring_fqcn_str = declaring_method_id.get_class_name().as_ref();
+        let declaring_method_opt = context.codebase.get_method(declaring_fqcn_str, method_name_str);
 
-        let (method_fqcn_str, appearing_method) = if let Some(method) = appearing_method_opt {
-            (appearing_fqcn_str, method)
-        } else if let Some(declaring_method_id) = class_like_metadata.declaring_method_ids.get(method_name_atom) {
-            let declaring_fqcn_str = declaring_method_id.get_class_name().as_ref();
-            let Some(method) = context.codebase.get_method(declaring_fqcn_str, method_name_str) else {
+        let (method_fqcn_str, appearing_method) = if let Some(method) = declaring_method_opt {
+            (declaring_fqcn_str, method)
+        } else if let Some(appearing_method_id) = class_like_metadata.appearing_method_ids.get(method_name_atom) {
+            let appearing_fqcn_str = appearing_method_id.get_class_name().as_ref();
+            let Some(method) = context.codebase.get_method(appearing_fqcn_str, method_name_str) else {
                 continue;
             };
-            (declaring_fqcn_str, method)
+
+            (appearing_fqcn_str, method)
         } else {
             continue;
         };
@@ -1517,6 +1632,13 @@ fn check_abstract_method_signatures<'ctx>(
             let Some(overridden_class) = context.codebase.get_class_like(declaring_class_name_str) else {
                 continue;
             };
+
+            if !class_like_metadata.kind.is_interface()
+                && overridden_class.kind.is_interface()
+                && class_like_metadata.direct_parent_interfaces.contains(&overridden_class.name)
+            {
+                continue;
+            }
 
             let Some(appearing_class) = context.codebase.get_class_like(method_fqcn_str) else {
                 continue;
@@ -2078,7 +2200,7 @@ fn check_interface_method_signatures<'ctx>(
             continue;
         };
 
-        let Some(class_method_id) = class_like_metadata.appearing_method_ids.get(method_name_atom) else {
+        let Some(class_method_id) = class_like_metadata.declaring_method_ids.get(method_name_atom) else {
             continue;
         };
 

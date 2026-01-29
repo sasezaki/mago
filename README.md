@@ -12,9 +12,9 @@
 
 [![CI Status](https://github.com/carthage-software/mago/actions/workflows/ci.yml/badge.svg)](https://github.com/carthage-software/mago/actions/workflows/ci.yml)
 [![CD Status](https://github.com/carthage-software/mago/actions/workflows/cd.yml/badge.svg)](https://github.com/carthage-software/mago/actions/workflows/cd.yml)
+[![CodeQL](https://github.com/carthage-software/mago/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/carthage-software/mago/actions/workflows/github-code-scanning/codeql)
 [![Crates.io](https://img.shields.io/crates/v/mago.svg)](https://crates.io/crates/mago)
 [![Latest Stable Version for PHP](https://poser.pugx.org/carthage-software/mago/v)](https://packagist.org/packages/carthage-software/mago)
-[![Latest Unstable Version for PHP](https://poser.pugx.org/carthage-software/mago/v/unstable)](https://packagist.org/packages/carthage-software/mago)
 [![Total Composer Downloads](http://poser.pugx.org/carthage-software/mago/downloads)](https://packagist.org/packages/carthage-software/mago)
 [![License](https://img.shields.io/crates/l/mago.svg)](https://github.com/carthage-software/mago/blob/main/LICENSE-MIT)
 
@@ -43,7 +43,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://carthage.software/mago.sh | bash
 To install a specific version:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://carthage.software/mago.sh | bash -s -- --version=1.0.0
+curl --proto '=https' --tlsv1.2 -sSf https://carthage.software/mago.sh | bash -s -- --version=1.2.2
 ```
 
 For all other installation methods, including Homebrew, Composer, and Cargo, please refer to our official **[Installation Guide](https://mago.carthage.software/guide/installation)**.

@@ -35,6 +35,11 @@ pub fn resolve_static_properties<'ctx, 'ast, 'arena>(
     let mut result = PropertyResolutionResult::default();
 
     let classnames = resolve_classnames_from_expression(context, block_context, artifacts, class_expression, false)?;
+    if let Some(class_type) = artifacts.get_expression_type(class_expression)
+        && class_type.is_nullable()
+    {
+        result.encountered_null = true;
+    }
 
     let mut property_names = vec![];
 
@@ -46,18 +51,18 @@ pub fn resolve_static_properties<'ctx, 'ast, 'arena>(
                 break 'resolve_names;
             }
             Variable::Indirect(indirect_variable) => {
-                let was_inside_general_use = block_context.inside_general_use;
-                block_context.inside_general_use = true;
+                let was_inside_general_use = block_context.flags.inside_general_use();
+                block_context.flags.set_inside_general_use(true);
                 indirect_variable.expression.analyze(context, block_context, artifacts)?;
-                block_context.inside_general_use = was_inside_general_use;
+                block_context.flags.set_inside_general_use(was_inside_general_use);
 
                 artifacts.get_rc_expression_type(indirect_variable.expression)
             }
             Variable::Nested(nested_variable) => {
-                let was_inside_general_use = block_context.inside_general_use;
-                block_context.inside_general_use = true;
+                let was_inside_general_use = block_context.flags.inside_general_use();
+                block_context.flags.set_inside_general_use(true);
                 nested_variable.variable.analyze(context, block_context, artifacts)?;
-                block_context.inside_general_use = was_inside_general_use;
+                block_context.flags.set_inside_general_use(was_inside_general_use);
 
                 artifacts.get_rc_expression_type(nested_variable.variable)
             }

@@ -39,6 +39,8 @@ use crate::settings::BraceStyle;
 
 use super::block::block_is_empty;
 
+/// Check if there is a newline character within a specified range of text.
+#[inline(always)]
 pub(super) fn has_new_line_in_range(text: &str, start: u32, end: u32) -> bool {
     text[start as usize..end as usize].contains('\n')
 }
@@ -553,6 +555,13 @@ pub(super) fn adjust_clause<'arena>(
                         Document::Array(vec![in f.arena; Document::Line(Line::default()), clause])
                     }
                 }
+                BraceStyle::AlwaysNextLine => {
+                    if f.settings.inline_empty_control_braces && is_block_empty {
+                        Document::Array(vec![in f.arena; Document::space(), clause])
+                    } else {
+                        Document::Array(vec![in f.arena; Document::Line(Line::hard()), clause])
+                    }
+                }
             }
         }
         _ => {
@@ -565,7 +574,13 @@ pub(super) fn adjust_clause<'arena>(
     };
 
     if has_trailing_segment {
-        if !is_block || f.is_followed_by_comment_on_next_line(node.span()) {
+        let is_do_while = matches!(f.current_node(), Node::DoWhile(_));
+
+        if !is_block
+            || f.is_followed_by_comment_on_next_line(node.span())
+            || f.has_same_line_trailing_comment(node.span())
+            || (f.settings.following_clause_on_newline && !is_do_while)
+        {
             Document::Array(vec![in f.arena; clause, Document::Line(Line::hard())])
         } else {
             Document::Array(vec![in f.arena; clause, Document::space()])

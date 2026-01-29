@@ -33,6 +33,7 @@ use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler;
 use crate::utils::conditional;
+use crate::utils::symbol_existence::extract_function_constant_existence;
 
 #[inline]
 pub fn analyze_logical_and_operation<'ctx, 'arena>(
@@ -48,10 +49,12 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
     left_block_context.assigned_variable_ids.clear();
     left_block_context.reconciled_expression_clauses = Vec::new();
 
-    let left_was_inside_general_use = left_block_context.inside_general_use;
-    left_block_context.inside_general_use = true;
+    let left_was_inside_general_use = left_block_context.flags.inside_general_use();
+    left_block_context.flags.set_inside_general_use(true);
     binary.lhs.analyze(context, &mut left_block_context, artifacts)?;
-    left_block_context.inside_general_use = left_was_inside_general_use;
+    left_block_context.flags.set_inside_general_use(left_was_inside_general_use);
+
+    extract_function_constant_existence(binary.lhs, artifacts, &mut left_block_context, false);
 
     let lhs_type = match artifacts.get_rc_expression_type(&binary.lhs).cloned() {
         Some(lhs_type) => {
@@ -111,8 +114,9 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
     } else {
         right_block_context = block_context.clone();
 
-        // Don't report issues when applying LHS assertions to prepare RHS context
-        // Issues will be reported when actually analyzing the RHS expression
+        right_block_context.known_functions.extend(left_block_context.known_functions.iter().copied());
+        right_block_context.known_constants.extend(left_block_context.known_constants.iter().copied());
+
         let empty_referenced_vars = AtomSet::default();
 
         reconciler::reconcile_keyed_types(
@@ -124,7 +128,7 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
             &empty_referenced_vars,
             &binary.rhs.span(),
             !binary.operator.span().is_zero(),
-            !block_context.inside_negation,
+            !block_context.flags.inside_negation(),
         );
     }
 
@@ -144,7 +148,7 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
 
         result_type = get_false();
         let mut dead_rhs_context = right_block_context.clone();
-        dead_rhs_context.has_returned = true;
+        dead_rhs_context.flags.set_has_returned(true);
         binary.rhs.analyze(context, &mut dead_rhs_context, artifacts)?;
     } else {
         binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
@@ -203,7 +207,7 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
         .conditionally_referenced_variable_ids
         .extend(right_block_context.conditionally_referenced_variable_ids);
 
-    if block_context.inside_conditional {
+    if block_context.flags.inside_conditional() {
         block_context.assigned_variable_ids = left_block_context.assigned_variable_ids;
         block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids);
     }
@@ -211,7 +215,7 @@ pub fn analyze_logical_and_operation<'ctx, 'arena>(
     if let Some(if_body_context) = &block_context.if_body_context {
         let mut if_body_context_inner = if_body_context.borrow_mut();
 
-        if block_context.inside_negation {
+        if block_context.flags.inside_negation() {
             block_context.locals = left_block_context.locals;
         } else {
             block_context.locals = right_block_context.locals;
@@ -355,7 +359,7 @@ pub fn analyze_logical_or_operation<'ctx, 'arena>(
         // true || x → true (no fix)
         report_redundant_logical_operation(context, binary, "always true", "not evaluated", "`true`", None);
         result_type = get_true();
-        right_block_context.has_returned = true;
+        right_block_context.flags.set_has_returned(true);
         binary.rhs.analyze(context, &mut right_block_context, artifacts)?;
     } else {
         if !negated_type_assertions.is_empty() {
@@ -368,7 +372,7 @@ pub fn analyze_logical_or_operation<'ctx, 'arena>(
                 &left_referenced_var_ids,
                 &binary.lhs.span(),
                 true,
-                !block_context.inside_negation,
+                !block_context.flags.inside_negation(),
             );
         }
 
@@ -379,11 +383,6 @@ pub fn analyze_logical_or_operation<'ctx, 'arena>(
                 BlockContext::remove_reconciled_clause_refs(&right_block_context.clauses, &changed_var_ids);
             right_block_context.clauses = partiioned_clauses.0;
             right_block_context.reconciled_expression_clauses.extend(partiioned_clauses.1);
-
-            let partiioned_clauses =
-                BlockContext::remove_reconciled_clause_refs(&block_context.clauses, &changed_var_ids);
-            block_context.clauses = partiioned_clauses.0;
-            block_context.reconciled_expression_clauses.extend(partiioned_clauses.1);
         }
 
         let pre_referenced_var_ids = right_block_context.conditionally_referenced_variable_ids.clone();
@@ -497,7 +496,7 @@ pub fn analyze_logical_or_operation<'ctx, 'arena>(
                 &right_referenced_var_ids,
                 &binary.rhs.span(),
                 !binary.operator.span().is_zero(),
-                block_context.inside_negation,
+                block_context.flags.inside_negation(),
             );
         }
 
@@ -559,28 +558,28 @@ pub fn analyze_logical_xor_operation<'ctx, 'arena>(
     check_logical_operand(context, binary.rhs, rhs_type, "Right", "xor");
 
     let result_type = if lhs_type.is_always_truthy() && rhs_type.is_always_truthy() {
-        if !block_context.inside_loop_expressions {
+        if !block_context.flags.inside_loop_expressions() {
             // true xor true → false (no fix)
             report_redundant_logical_operation(context, binary, "always true", "always true", "`false`", None);
         }
 
         get_false()
     } else if lhs_type.is_always_truthy() && rhs_type.is_always_falsy() {
-        if !block_context.inside_loop_expressions {
+        if !block_context.flags.inside_loop_expressions() {
             // true xor false → true (no fix)
             report_redundant_logical_operation(context, binary, "always true", "always false", "`true`", None);
         }
 
         get_true()
     } else if lhs_type.is_always_falsy() && rhs_type.is_always_truthy() {
-        if !block_context.inside_loop_expressions {
+        if !block_context.flags.inside_loop_expressions() {
             // false xor true → true (no fix)
             report_redundant_logical_operation(context, binary, "always false", "always true", "`true`", None);
         }
 
         get_true()
     } else if lhs_type.is_always_falsy() && rhs_type.is_always_falsy() {
-        if !block_context.inside_loop_expressions {
+        if !block_context.flags.inside_loop_expressions() {
             // false xor false → false (no fix)
             report_redundant_logical_operation(context, binary, "always false", "always false", "`false`", None);
         }

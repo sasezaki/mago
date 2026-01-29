@@ -1,5 +1,14 @@
+//! This file is auto-generated. Do not edit manually.
+
+/// An issue code representing a specific type of analysis issue.
+///
+/// Each issue code corresponds to a unique identifier for a particular
+/// kind of issue that the analyzer can detect during code analysis.
+///
+/// This enum is non-exhaustive; new issue codes may be added in future versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u16)]
+#[non_exhaustive]
 pub enum IssueCode {
     AbstractClassUsedAsAttribute,
     AbstractInstantiation,
@@ -33,6 +42,7 @@ pub enum IssueCode {
     DuplicateArrayKey,
     DuplicateCaughtType,
     DuplicateClosureUseVariable,
+    DuplicateDefinition,
     DuplicateNamedArgument,
     DynamicStaticMethodCall,
     EmptyMatchExpression,
@@ -214,6 +224,7 @@ pub enum IssueCode {
     PossiblyInvalidClone,
     PossiblyInvalidIterator,
     PossiblyInvalidOperand,
+    PossiblyNonExistentMethod,
     PossiblyNonExistentProperty,
     PossiblyNullArgument,
     PossiblyNullArrayAccess,
@@ -278,12 +289,15 @@ pub enum IssueCode {
     UnreachableSwitchDefault,
     UnsafeInstantiation,
     UnusedFunctionCall,
+    UnusedMethod,
     UnusedMethodCall,
     UnusedParameter,
+    UnusedProperty,
     UnusedStatement,
     UnusedTemplateParameter,
     UselessControlFlow,
     WhereConstraintViolation,
+    WriteOnlyProperty,
     YieldFromInvalidKeyType,
     YieldFromInvalidSendType,
     YieldFromInvalidValueType,
@@ -326,6 +340,7 @@ impl IssueCode {
             Self::DuplicateArrayKey => "duplicate-array-key",
             Self::DuplicateCaughtType => "duplicate-caught-type",
             Self::DuplicateClosureUseVariable => "duplicate-closure-use-variable",
+            Self::DuplicateDefinition => "duplicate-definition",
             Self::DuplicateNamedArgument => "duplicate-named-argument",
             Self::DynamicStaticMethodCall => "dynamic-static-method-call",
             Self::EmptyMatchExpression => "empty-match-expression",
@@ -507,6 +522,7 @@ impl IssueCode {
             Self::PossiblyInvalidClone => "possibly-invalid-clone",
             Self::PossiblyInvalidIterator => "possibly-invalid-iterator",
             Self::PossiblyInvalidOperand => "possibly-invalid-operand",
+            Self::PossiblyNonExistentMethod => "possibly-non-existent-method",
             Self::PossiblyNonExistentProperty => "possibly-non-existent-property",
             Self::PossiblyNullArgument => "possibly-null-argument",
             Self::PossiblyNullArrayAccess => "possibly-null-array-access",
@@ -571,12 +587,15 @@ impl IssueCode {
             Self::UnreachableSwitchDefault => "unreachable-switch-default",
             Self::UnsafeInstantiation => "unsafe-instantiation",
             Self::UnusedFunctionCall => "unused-function-call",
+            Self::UnusedMethod => "unused-method",
             Self::UnusedMethodCall => "unused-method-call",
             Self::UnusedParameter => "unused-parameter",
+            Self::UnusedProperty => "unused-property",
             Self::UnusedStatement => "unused-statement",
             Self::UnusedTemplateParameter => "unused-template-parameter",
             Self::UselessControlFlow => "useless-control-flow",
             Self::WhereConstraintViolation => "where-constraint-violation",
+            Self::WriteOnlyProperty => "write-only-property",
             Self::YieldFromInvalidKeyType => "yield-from-invalid-key-type",
             Self::YieldFromInvalidSendType => "yield-from-invalid-send-type",
             Self::YieldFromInvalidValueType => "yield-from-invalid-value-type",
@@ -627,6 +646,7 @@ impl std::str::FromStr for IssueCode {
             "duplicate-array-key" => Ok(Self::DuplicateArrayKey),
             "duplicate-caught-type" => Ok(Self::DuplicateCaughtType),
             "duplicate-closure-use-variable" => Ok(Self::DuplicateClosureUseVariable),
+            "duplicate-definition" => Ok(Self::DuplicateDefinition),
             "duplicate-named-argument" => Ok(Self::DuplicateNamedArgument),
             "dynamic-static-method-call" => Ok(Self::DynamicStaticMethodCall),
             "empty-match-expression" => Ok(Self::EmptyMatchExpression),
@@ -808,6 +828,7 @@ impl std::str::FromStr for IssueCode {
             "possibly-invalid-clone" => Ok(Self::PossiblyInvalidClone),
             "possibly-invalid-iterator" => Ok(Self::PossiblyInvalidIterator),
             "possibly-invalid-operand" => Ok(Self::PossiblyInvalidOperand),
+            "possibly-non-existent-method" => Ok(Self::PossiblyNonExistentMethod),
             "possibly-non-existent-property" => Ok(Self::PossiblyNonExistentProperty),
             "possibly-null-argument" => Ok(Self::PossiblyNullArgument),
             "possibly-null-array-access" => Ok(Self::PossiblyNullArrayAccess),
@@ -872,12 +893,15 @@ impl std::str::FromStr for IssueCode {
             "unreachable-switch-default" => Ok(Self::UnreachableSwitchDefault),
             "unsafe-instantiation" => Ok(Self::UnsafeInstantiation),
             "unused-function-call" => Ok(Self::UnusedFunctionCall),
+            "unused-method" => Ok(Self::UnusedMethod),
             "unused-method-call" => Ok(Self::UnusedMethodCall),
             "unused-parameter" => Ok(Self::UnusedParameter),
+            "unused-property" => Ok(Self::UnusedProperty),
             "unused-statement" => Ok(Self::UnusedStatement),
             "unused-template-parameter" => Ok(Self::UnusedTemplateParameter),
             "useless-control-flow" => Ok(Self::UselessControlFlow),
             "where-constraint-violation" => Ok(Self::WhereConstraintViolation),
+            "write-only-property" => Ok(Self::WriteOnlyProperty),
             "yield-from-invalid-key-type" => Ok(Self::YieldFromInvalidKeyType),
             "yield-from-invalid-send-type" => Ok(Self::YieldFromInvalidSendType),
             "yield-from-invalid-value-type" => Ok(Self::YieldFromInvalidValueType),

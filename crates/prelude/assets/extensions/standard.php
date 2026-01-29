@@ -1355,9 +1355,7 @@ function strtolower(string $string): string
 }
 
 /**
- * @param int<0, max> $offset
- *
- * @return int<0, max>|false
+ * @return non-negative-int|false
  *
  * @pure
  */
@@ -1960,7 +1958,7 @@ function strchr(string $haystack, string $needle, bool $before_needle = false): 
 }
 
 /**
- * @param string|int|float|Stringable ...$values
+ * @param string|int|float|bool|null|Stringable ...$values
  *
  * @pure
  */
@@ -1969,7 +1967,7 @@ function sprintf(string $format, mixed ...$values): string
 }
 
 /**
- * @param string|int|float|Stringable ...$values
+ * @param string|int|float|bool|null|Stringable ...$values
  *
  * @return int<0, max>
  */
@@ -1978,7 +1976,7 @@ function printf(string $format, mixed ...$values): int
 }
 
 /**
- * @param array<string|int|float|Stringable> $values
+ * @param array<string|int|float|bool|null|Stringable> $values
  *
  * @pure
  */
@@ -1987,7 +1985,7 @@ function vprintf(string $format, array $values): int
 }
 
 /**
- * @param array<string|int|float|Stringable> $values
+ * @param array<string|int|float|bool|null|Stringable> $values
  *
  * @pure
  */
@@ -1997,7 +1995,7 @@ function vsprintf(string $format, array $values): string
 
 /**
  * @param resource $stream
- * @param string|int|float|Stringable ...$values
+ * @param string|int|float|bool|null|Stringable ...$values
  *
  * @pure
  */
@@ -2007,7 +2005,7 @@ function fprintf($stream, string $format, mixed ...$values): int
 
 /**
  * @param resource $stream
- * @param array<string|int|float|Stringable> $values
+ * @param array<string|int|float|bool|null|Stringable> $values
  *
  * @pure
  */
@@ -4711,7 +4709,9 @@ function array_filter(array $array, null|callable $callback = null, int $mode = 
  * @param array<K, V> $array
  * @param array<S> ...$arrays
  *
- * @return ($array is list<V> ? list<U> : array<K, U>)
+ * @return ($array is list<V>
+ *     ? ($array is non-empty-list<V> ? non-empty-list<U> : list<U>)
+ *     : ($array is non-empty-array<K, V> ? non-empty-array<K, U> : array<K, U>))
  */
 function array_map(null|callable $callback, array $array, array ...$arrays): array
 {
@@ -5237,7 +5237,11 @@ function reset(object|array &$array): mixed
  *
  * @param object|array<T> $array
  *
- * @return $array is-non-empty-array|non-empty-list ? T : T|null
+ * @return (
+ *   $array is object ? mixed : (
+ *     $array is non-empty-array|non-empty-list ? T : T|false
+ *   )
+ * )
  *
  * @pure
  */
@@ -5515,7 +5519,7 @@ function header_register_callback(callable $callback): bool
  *  mime: string
  * }
  */
-function getimagesizefromstring(string $string, &$image_info): array|false
+function getimagesizefromstring(string $string, null|array &$image_info = null): array|false
 {
 }
 

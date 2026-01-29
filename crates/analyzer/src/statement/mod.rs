@@ -22,6 +22,8 @@ use crate::error::AnalysisError;
 use crate::plugin::HookAction;
 use crate::plugin::context::HookContext;
 use crate::utils::docblock::populate_docblock_variables;
+use crate::utils::docblock::populate_docblock_variables_excluding;
+use crate::utils::expression::get_expression_id;
 use crate::utils::expression::get_function_like_id_from_call;
 
 pub mod attributes;
@@ -66,29 +68,28 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Statement<'arena> {
             }
         }
 
-        let should_populate_docblock_variables = matches!(
-            self,
-            Statement::Block(_)
-                | Statement::Expression(_)
-                | Statement::Try(_)
-                | Statement::Continue(_)
-                | Statement::Break(_)
-                | Statement::Return(_)
-                | Statement::Echo(_)
-                | Statement::EchoTag(_)
-                | Statement::Unset(_)
-                | Statement::Inline(_)
-                | Statement::OpeningTag(_)
-                | Statement::Declare(_)
-                | Statement::Noop(_)
-                | Statement::ClosingTag(_)
-                | Statement::HaltCompiler(_)
-        );
+        // For assignment statements, we populate all @var annotations except the one
+        // for the assignment target variable. The assignment analyzer handles that one
+        // to support the pattern: /** @var Type */ $var = something();
+        if let Statement::Expression(ExpressionStatement { expression, .. }) = self
+            && let Some(target_var) = get_expression_id(
+                expression,
+                block_context.scope.get_class_like_name(),
+                context.resolved_names,
+                Some(context.codebase),
+            )
+        {
+            populate_docblock_variables_excluding(
+                context,
+                block_context,
+                artifacts,
+                true, // override existing for non-target variables
+                Some(target_var),
+            );
+        } else {
+            let override_existing = !matches!(self, Statement::Foreach(_));
 
-        if should_populate_docblock_variables {
-            let override_existing_variables = !matches!(self, Statement::Expression(ExpressionStatement { expression, .. }) if expression.is_assignment());
-
-            populate_docblock_variables(context, block_context, artifacts, override_existing_variables);
+            populate_docblock_variables(context, block_context, artifacts, override_existing);
         }
 
         let result = match self {
@@ -223,7 +224,7 @@ pub fn analyze_statements<'ctx, 'arena>(
     artifacts: &mut AnalysisArtifacts,
 ) -> Result<(), AnalysisError> {
     for statement in statements {
-        if block.has_returned {
+        if block.flags.has_returned() {
             if context.settings.find_unused_expressions {
                 let is_harmless = match &statement {
                     Statement::Break(_) => true,

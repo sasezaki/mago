@@ -119,7 +119,6 @@ use crate::internal::format::return_value::format_return_value;
 use crate::internal::format::statement::print_statement_sequence;
 use crate::internal::format::string::print_lowercase_keyword;
 use crate::internal::utils;
-use crate::settings::NullTypeHint;
 use crate::wrap;
 
 pub mod alignment;
@@ -1353,12 +1352,12 @@ impl<'arena> Format<'arena> for Hint<'arena> {
         wrap!(f, self, Hint, {
             match self {
                 Hint::Identifier(identifier) => identifier.format(f),
-                Hint::Parenthesized(parenthesized_hint) => Document::Group(Group::new(vec![
+                Hint::Parenthesized(parenthesized_hint) => Document::Array(vec![
                     in f.arena;
                     format_token(f, parenthesized_hint.left_parenthesis, "("),
                     parenthesized_hint.hint.format(f),
                     format_token(f, parenthesized_hint.right_parenthesis, ")"),
-                ])),
+                ]),
                 Hint::Nullable(nullable_hint) => {
                     // If the nullable type is nested inside another type hint,
                     // we cannot use `?` syntax.
@@ -1368,25 +1367,15 @@ impl<'arena> Format<'arena> for Hint<'arena> {
                             Hint::Nullable(_) | Hint::Union(_) | Hint::Intersection(_) | Hint::Parenthesized(_)
                         ));
 
-                    if force_long_syntax {
-                        return Document::Group(Group::new(vec![
+                    if force_long_syntax || !f.settings.null_type_hint.is_question() {
+                        Document::Array(vec![
                             in f.arena;
                             Document::String("null"),
                             Document::String("|"),
                             nullable_hint.hint.format(f),
-                        ]));
-                    }
-
-                    match f.settings.null_type_hint {
-                        NullTypeHint::NullPipe => Document::Group(Group::new(vec![
-                            in f.arena;
-                            Document::String("null"),
-                            Document::String("|"),
-                            nullable_hint.hint.format(f),
-                        ])),
-                        NullTypeHint::Question => Document::Group(Group::new(
-                            vec![in f.arena; Document::String("?"), nullable_hint.hint.format(f)],
-                        )),
+                        ])
+                    } else {
+                        Document::Array(vec![in f.arena; Document::String("?"), nullable_hint.hint.format(f)])
                     }
                 }
                 Hint::Union(union_hint) => {
@@ -1400,39 +1389,36 @@ impl<'arena> Format<'arena> for Hint<'arena> {
                             Hint::Nullable(_) | Hint::Union(_) | Hint::Intersection(_) | Hint::Parenthesized(_)
                         );
 
-                    if !force_long_syntax {
-                        if let Hint::Null(_) = union_hint.left
-                            && f.settings.null_type_hint.is_question()
-                        {
-                            return Document::Group(Group::new(vec![
-                                in f.arena;
-                                Document::String("?"),
-                                union_hint.right.format(f),
-                            ]));
-                        }
+                    let use_short_syntax = if !force_long_syntax && f.settings.null_type_hint.is_question() {
+                        matches!(union_hint.left, Hint::Null(_)) || matches!(union_hint.right, Hint::Null(_))
+                    } else {
+                        false
+                    };
 
-                        if let Hint::Null(_) = union_hint.right
-                            && f.settings.null_type_hint.is_question()
-                        {
-                            return Document::Group(Group::new(
-                                vec![in f.arena; Document::String("?"), union_hint.left.format(f)],
-                            ));
-                        }
+                    if use_short_syntax {
+                        let non_null_hint =
+                            if matches!(union_hint.left, Hint::Null(_)) { &union_hint.right } else { &union_hint.left };
+
+                        Document::Array(vec![
+                            in f.arena;
+                            Document::String("?"),
+                            non_null_hint.format(f),
+                        ])
+                    } else {
+                        Document::Array(vec![
+                            in f.arena;
+                            union_hint.left.format(f),
+                            format_token(f, union_hint.pipe, "|"),
+                            union_hint.right.format(f),
+                        ])
                     }
-
-                    Document::Group(Group::new(vec![
-                        in f.arena;
-                        union_hint.left.format(f),
-                        format_token(f, union_hint.pipe, "|"),
-                        union_hint.right.format(f),
-                    ]))
                 }
-                Hint::Intersection(intersection_hint) => Document::Group(Group::new(vec![
+                Hint::Intersection(intersection_hint) => Document::Array(vec![
                     in f.arena;
                     intersection_hint.left.format(f),
                     format_token(f, intersection_hint.ampersand, "&"),
                     intersection_hint.right.format(f),
-                ])),
+                ]),
                 Hint::Null(_) => Document::String("null"),
                 Hint::True(_) => Document::String("true"),
                 Hint::False(_) => Document::String("false"),
@@ -1610,29 +1596,55 @@ impl<'arena> Format<'arena> for PropertyHook<'arena> {
 impl<'arena> Format<'arena> for PropertyHookList<'arena> {
     fn format(&'arena self, f: &mut FormatterState<'_, 'arena>) -> Document<'arena> {
         wrap!(f, self, PropertyHookList, {
-            Document::Group(Group::new(vec![
-                in f.arena;
-                Document::String("{"),
-                f.print_trailing_comments(self.left_brace).unwrap_or_else(Document::empty),
-                if self.hooks.is_empty() {
-                    Document::empty()
-                } else {
-                    Document::Indent(vec![
-                        in f.arena;
-                        Document::Line(Line::hard()),
-                        Document::Array(Document::join(
-                            f.arena,
-                            self.hooks.iter().map(|hook| hook.format(f)),
-                            Separator::HardLine,
-                        )),
-                    ])
-                },
-                f.print_dangling_comments(self.span(), true).unwrap_or_else(|| {
-                    if self.hooks.is_empty() { Document::empty() } else { Document::Line(Line::hard()) }
-                }),
-                Document::String("}"),
-                f.print_trailing_comments(self.right_brace).unwrap_or_else(Document::empty),
-            ]))
+            let can_inline = f.settings.inline_abstract_property_hooks
+                && !self.hooks.is_empty()
+                && self.hooks.iter().all(|hook| {
+                    hook.attribute_lists.is_empty()
+                        && hook.modifiers.is_empty()
+                        && matches!(hook.body, PropertyHookBody::Abstract(_))
+                });
+
+            if can_inline {
+                Document::Group(Group::new(vec![
+                    in f.arena;
+                    Document::String("{"),
+                    f.print_trailing_comments(self.left_brace).unwrap_or_else(Document::empty),
+                    Document::String(" "),
+                    Document::Array(Document::join(
+                        f.arena,
+                        self.hooks.iter().map(|hook| hook.format(f)),
+                        Separator::Space,
+                    )),
+                    f.print_dangling_comments(self.span(), true).unwrap_or_else(Document::empty),
+                    Document::String(" "),
+                    Document::String("}"),
+                    f.print_trailing_comments(self.right_brace).unwrap_or_else(Document::empty),
+                ]))
+            } else {
+                Document::Group(Group::new(vec![
+                    in f.arena;
+                    Document::String("{"),
+                    f.print_trailing_comments(self.left_brace).unwrap_or_else(Document::empty),
+                    if self.hooks.is_empty() {
+                        Document::empty()
+                    } else {
+                        Document::Indent(vec![
+                            in f.arena;
+                            Document::Line(Line::hard()),
+                            Document::Array(Document::join(
+                                f.arena,
+                                self.hooks.iter().map(|hook| hook.format(f)),
+                                Separator::HardLine,
+                            )),
+                        ])
+                    },
+                    f.print_dangling_comments(self.span(), true).unwrap_or_else(|| {
+                        if self.hooks.is_empty() { Document::empty() } else { Document::Line(Line::hard()) }
+                    }),
+                    Document::String("}"),
+                    f.print_trailing_comments(self.right_brace).unwrap_or_else(Document::empty),
+                ]))
+            }
         })
     }
 }
@@ -1717,12 +1729,20 @@ impl<'arena> Format<'arena> for Try<'arena> {
             let mut parts = vec![in f.arena; self.r#try.format(f), Document::space(), self.block.format(f)];
 
             for clause in &self.catch_clauses {
-                parts.push(Document::space());
+                if f.settings.following_clause_on_newline {
+                    parts.push(Document::Line(Line::hard()));
+                } else {
+                    parts.push(Document::space());
+                }
                 parts.push(clause.format(f));
             }
 
             if let Some(clause) = &self.finally_clause {
-                parts.push(Document::space());
+                if f.settings.following_clause_on_newline {
+                    parts.push(Document::Line(Line::hard()));
+                } else {
+                    parts.push(Document::space());
+                }
                 parts.push(clause.format(f));
             }
 

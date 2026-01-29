@@ -1,10 +1,9 @@
 use std::rc::Rc;
 
 use ahash::HashMap;
+
 use mago_atom::atom;
-
 use mago_codex::context::ScopeContext;
-
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::add_union_type;
@@ -51,19 +50,28 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
         };
 
         let mut scope = ScopeContext::new();
-        scope.set_class_like(block_context.scope.get_class_like());
         scope.set_function_like(Some(function_metadata));
-        scope.set_static(self.r#static.is_some());
+        if let Some(bind_scope) = &artifacts.closure_bind_scope {
+            if let Some(class_name) = bind_scope.class_name {
+                scope.set_class_like(context.codebase.get_class_like(&class_name));
+            } else {
+                scope.set_class_like(block_context.scope.get_class_like());
+            }
+            scope.set_static(!bind_scope.has_this);
+        } else {
+            scope.set_class_like(block_context.scope.get_class_like());
+            scope.set_static(self.r#static.is_some());
+        }
 
         let mut inner_block_context = BlockContext::new(scope, context.settings.register_super_globals);
 
         let mut variable_spans = HashMap::default();
         if let Some(use_clause) = self.use_clause.as_ref() {
             for use_variable in &use_clause.variables {
-                let was_inside_general_use = block_context.inside_general_use;
-                block_context.inside_general_use = true;
+                let was_inside_general_use = block_context.flags.inside_general_use();
+                block_context.flags.set_inside_general_use(true);
                 use_variable.variable.analyze(context, block_context, artifacts)?;
-                block_context.inside_general_use = was_inside_general_use;
+                block_context.flags.set_inside_general_use(was_inside_general_use);
 
                 let variable = use_variable.variable.name;
                 let variable_span = use_variable.variable.span;
@@ -204,7 +212,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Closure<'arena> {
             if let Some(inferred_return_type) = inferred_return_type {
                 signature.return_type = Some(Box::new(inferred_return_type));
             } else if !function_metadata.flags.has_yield() {
-                if inner_block_context.has_returned {
+                if inner_block_context.flags.has_returned() {
                     signature.return_type = Some(Box::new(get_never()));
                 } else {
                     signature.return_type = Some(Box::new(get_void()));

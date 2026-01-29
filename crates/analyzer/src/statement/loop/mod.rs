@@ -15,12 +15,12 @@ use mago_atom::atom;
 
 use mago_codex::ttype;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::bool::TBool;
 use mago_codex::ttype::combine_union_types;
-use mago_codex::ttype::combiner::combine;
 use mago_codex::ttype::get_array_parameters;
 use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_iterable_parameters;
@@ -91,7 +91,7 @@ fn analyze_for_or_while_loop<'ctx, 'ast, 'arena>(
     block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
 
     let mut loop_block_context = block_context.clone();
-    loop_block_context.inside_loop = true;
+    loop_block_context.flags.set_inside_loop(true);
     loop_block_context.break_types.push(BreakContext::Loop);
     let previous_loop_bounds = loop_block_context.loop_bounds;
     loop_block_context.loop_bounds = span.to_offset_tuple();
@@ -139,8 +139,8 @@ fn inherit_loop_block_context<'ctx>(
     always_enters_loop: bool,
     known_infinite_loop: bool,
 ) {
-    let has_break = loop_scope.final_actions.contains(&ControlAction::Break);
-    let has_continue = loop_scope.final_actions.contains(&ControlAction::Continue);
+    let has_break = loop_scope.final_actions.contains(ControlAction::Break);
+    let has_continue = loop_scope.final_actions.contains(ControlAction::Continue);
     let has_break_or_continue = has_break || has_continue;
     let can_leave_loop = !known_infinite_loop || has_break;
 
@@ -167,7 +167,7 @@ fn inherit_loop_block_context<'ctx>(
         }
     } else {
         block_context.control_actions.insert(ControlAction::End);
-        block_context.has_returned = true;
+        block_context.flags.set_has_returned(true);
     }
 
     if can_leave_loop {
@@ -263,7 +263,7 @@ fn analyze<'ctx, 'ast, 'arena>(
     }
 
     let final_actions = ControlAction::from_statements(statements.iter().collect(), vec![], Some(artifacts), true);
-    let does_always_break = final_actions.len() == 1 && final_actions.contains(&ControlAction::Break);
+    let does_always_break = final_actions.len() == 1 && final_actions.contains(ControlAction::Break);
 
     let mut continue_context;
     let mut inner_do_context = None;
@@ -301,11 +301,11 @@ fn analyze<'ctx, 'ast, 'arena>(
 
         update_loop_scope_contexts(&mut loop_scope, loop_context, &mut continue_context, loop_parent_context, context);
 
-        loop_context.inside_loop_expressions = true;
+        loop_context.flags.set_inside_loop_expressions(true);
         for post_expression in post_expressions {
             post_expression.analyze(context, loop_context, artifacts)?;
         }
-        loop_context.inside_loop_expressions = true;
+        loop_context.flags.set_inside_loop_expressions(true);
     } else {
         let original_parent_context = loop_parent_context.clone();
 
@@ -376,12 +376,12 @@ fn analyze<'ctx, 'ast, 'arena>(
                 pre_conditions_applied = true;
             }
 
-            continue_context.inside_loop_expressions = true;
+            continue_context.flags.set_inside_loop_expressions(true);
             for post_expression in &post_expressions {
                 post_expression.analyze(context, &mut continue_context, artifacts)?;
             }
 
-            continue_context.inside_loop_expressions = false;
+            continue_context.flags.set_inside_loop_expressions(false);
 
             Result::<_, AnalysisError>::Ok((loop_scope, continue_context))
         });
@@ -462,15 +462,15 @@ fn analyze<'ctx, 'ast, 'arena>(
                 }
             }
 
-            continue_context.has_returned = false;
+            continue_context.flags.set_has_returned(false);
 
             // if there are no changes to the types, no need to re-examine
             if !has_changes {
-                continue_context.inside_loop_expressions = true;
+                continue_context.flags.set_inside_loop_expressions(true);
                 for post_expression in &post_expressions {
                     post_expression.analyze(context, &mut continue_context, artifacts)?;
                 }
-                continue_context.inside_loop_expressions = false;
+                continue_context.flags.set_inside_loop_expressions(false);
 
                 break;
             }
@@ -567,11 +567,11 @@ fn analyze<'ctx, 'ast, 'arena>(
                     pre_conditions_applied = true;
                 }
 
-                continue_context.inside_loop_expressions = true;
+                continue_context.flags.set_inside_loop_expressions(true);
                 for post_expression in &post_expressions {
                     post_expression.analyze(context, &mut continue_context, artifacts)?;
                 }
-                continue_context.inside_loop_expressions = false;
+                continue_context.flags.set_inside_loop_expressions(false);
 
                 Ok(loop_scope)
             });
@@ -591,7 +591,7 @@ fn analyze<'ctx, 'ast, 'arena>(
 
     debug_assert!(pre_conditions_applied, "Pre-conditions should have been applied at least once.");
 
-    let does_sometimes_break = loop_scope.final_actions.contains(&ControlAction::Break);
+    let does_sometimes_break = loop_scope.final_actions.contains(ControlAction::Break);
     let does_always_break = does_sometimes_break && loop_scope.final_actions.len() == 1;
 
     if does_sometimes_break {
@@ -721,7 +721,7 @@ fn analyze<'ctx, 'ast, 'arena>(
     }
 
     if always_enters_loop {
-        let does_sometimes_continue = loop_scope.final_actions.contains(&ControlAction::Continue);
+        let does_sometimes_continue = loop_scope.final_actions.contains(ControlAction::Continue);
 
         for (variable_id, variable_type) in &continue_context.locals {
             // if there are break statements in the loop it's not certain
@@ -792,13 +792,13 @@ fn apply_pre_condition_to_loop_context<'ctx, 'arena>(
     let pre_condition_span = pre_condition.span();
     let pre_referenced_variable_ids = std::mem::take(&mut loop_context.conditionally_referenced_variable_ids);
 
-    loop_context.inside_conditional = true;
-    loop_context.inside_loop_expressions = true;
+    loop_context.flags.set_inside_conditional(true);
+    loop_context.flags.set_inside_loop_expressions(true);
 
     pre_condition.analyze(context, loop_context, artifacts)?;
 
-    loop_context.inside_loop_expressions = false;
-    loop_context.inside_conditional = false;
+    loop_context.flags.set_inside_loop_expressions(false);
+    loop_context.flags.set_inside_conditional(false);
 
     if first_application {
         let is_truthy = if let Some(condition_type) = artifacts.get_expression_type(pre_condition) {
@@ -874,9 +874,9 @@ fn update_loop_scope_contexts<'ctx>(
     pre_outer_context: &BlockContext<'ctx>,
     context: &Context<'ctx, '_>,
 ) {
-    if loop_scope.final_actions.contains(&ControlAction::Continue) {
+    if loop_scope.final_actions.contains(ControlAction::Continue) {
         for (variable_id, variable_type) in &loop_scope.redefined_loop_variables {
-            continue_context.locals.insert(*variable_id, Rc::new(variable_type.clone()));
+            continue_context.locals.insert(*variable_id, variable_type.clone());
         }
 
         for (variable_id, variable_type) in &loop_scope.possibly_redefined_loop_variables {
@@ -931,10 +931,10 @@ fn analyze_iterator<'ctx, 'ast, 'arena>(
     iterator_variable_id: Option<&Atom>,
     foreach: &'ast Foreach<'arena>,
 ) -> Result<(bool, TUnion, TUnion), AnalysisError> {
-    let was_inside_general_use = block_context.inside_general_use;
-    block_context.inside_general_use = true;
+    let was_inside_general_use = block_context.flags.inside_general_use();
+    block_context.flags.set_inside_general_use(true);
     iterator.analyze(context, block_context, artifacts)?;
-    block_context.inside_general_use = was_inside_general_use;
+    block_context.flags.set_inside_general_use(was_inside_general_use);
 
     let iterator_type = if let Some(it_type) = artifacts.get_rc_expression_type(iterator).cloned() {
         it_type
@@ -1014,8 +1014,8 @@ fn analyze_iterator<'ctx, 'ast, 'arena>(
     }
 
     let mut has_at_least_one_entry = false;
-    let mut collected_key_atomics: Vec<TAtomic> = vec![];
-    let mut collected_value_atomics: Vec<TAtomic> = vec![];
+    let mut key_type = None;
+    let mut value_type = None;
     let mut has_valid_iterable_type = false;
     let mut invalid_atomic_ids = Vec::with_capacity(iterator_type.types.len());
 
@@ -1035,15 +1035,25 @@ fn analyze_iterator<'ctx, 'ast, 'arena>(
                 }
 
                 let (k, v) = get_array_parameters(array, context.codebase);
-                collected_key_atomics.extend(k.types.into_owned());
-                collected_value_atomics.extend(v.types.into_owned());
+
+                key_type = Some(add_optional_union_type(k, key_type.as_ref(), context.codebase));
+                value_type = Some(add_optional_union_type(v, value_type.as_ref(), context.codebase));
             }
             TAtomic::Iterable(iterable) => {
                 has_valid_iterable_type = true;
                 has_at_least_one_entry = false;
 
-                collected_key_atomics.extend(iterable.key_type.types.iter().cloned());
-                collected_value_atomics.extend(iterable.value_type.types.iter().cloned());
+                key_type = Some(add_optional_union_type(
+                    iterable.key_type.as_ref().clone(),
+                    key_type.as_ref(),
+                    context.codebase,
+                ));
+
+                value_type = Some(add_optional_union_type(
+                    iterable.value_type.as_ref().clone(),
+                    value_type.as_ref(),
+                    context.codebase,
+                ));
             }
             TAtomic::Object(object) => {
                 let (obj_key_type, obj_value_type) = match object {
@@ -1127,8 +1137,8 @@ fn analyze_iterator<'ctx, 'ast, 'arena>(
 
                 has_valid_iterable_type = true;
 
-                collected_key_atomics.extend(obj_key_type.types.into_owned());
-                collected_value_atomics.extend(obj_value_type.types.into_owned());
+                key_type = Some(add_optional_union_type(obj_key_type, key_type.as_ref(), context.codebase));
+                value_type = Some(add_optional_union_type(obj_value_type, value_type.as_ref(), context.codebase));
             }
             _ => {
                 let iterator_atomic_id = iterator_atomic.get_id();
@@ -1196,19 +1206,7 @@ fn analyze_iterator<'ctx, 'ast, 'arena>(
         return Ok((false, get_mixed(), get_mixed()));
     }
 
-    let final_key_type = if collected_key_atomics.is_empty() {
-        get_mixed()
-    } else {
-        TUnion::from_vec(combine(collected_key_atomics, context.codebase, false))
-    };
-
-    let final_value_type = if collected_value_atomics.is_empty() {
-        get_mixed()
-    } else {
-        TUnion::from_vec(combine(collected_value_atomics, context.codebase, false))
-    };
-
-    Ok((has_at_least_one_entry, final_key_type, final_value_type))
+    Ok((has_at_least_one_entry, key_type.unwrap_or_else(get_mixed), value_type.unwrap_or_else(get_mixed)))
 }
 
 /// Scrapes all direct variable names from an expression and indicates if a reference operator (`&`)

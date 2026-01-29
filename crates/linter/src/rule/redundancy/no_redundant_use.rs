@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use indoc::indoc;
 use schemars::JsonSchema;
@@ -13,6 +14,7 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_reporting::Level;
 use mago_span::HasSpan;
+use mago_span::Span;
 use mago_syntax::ast::Inline;
 use mago_syntax::ast::MixedUseItemList;
 use mago_syntax::ast::Node;
@@ -64,7 +66,8 @@ impl LintRule for NoRedundantUseRule {
             name: "No Redundant Use",
             code: "no-redundant-use",
             description: indoc! {"
-                Detects `use` statements that import items that are never used.
+                Detects `use` statements that import items that are never used or are redundant
+                because they import from the same namespace.
             "},
             good_example: indoc! {r"
                 <?php
@@ -107,7 +110,13 @@ impl LintRule for NoRedundantUseRule {
         // If `tempest` integration is enabled, and this file ends with `.view.php`,
         // check inline mentions as well.
         if ctx.registry.is_integration_enabled(Integration::Tempest)
-            && ctx.source_file.path.as_ref().and_then(|p| p.to_str()).is_some_and(|s| s.ends_with(".view.php"))
+            && ctx
+                .source_file
+                .path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .unwrap_or(ctx.source_file.name.as_ref())
+                .ends_with(".view.php")
         {
             check_inline_mentions = true;
         }
@@ -122,12 +131,49 @@ impl LintRule for NoRedundantUseRule {
         let inline_contents =
             if check_inline_mentions { utils::get_inline_contents(program) } else { Vec::with_capacity(0) };
 
+        // First, check for same-namespace imports (redundant even if used)
+        let mut same_namespace_spans: HashSet<Span> = HashSet::new();
+        for decl in &use_declarations {
+            if utils::is_same_namespace_import(decl) {
+                let alias = utils::get_alias(decl.item);
+                let Statement::Use(use_stmt) = decl.parent_stmt else { continue };
+                same_namespace_spans.insert(decl.item.span());
+
+                let message = match &decl.namespace {
+                    Some(ns) => format!("Redundant import: `{alias}` is already in the current namespace `{ns}`."),
+                    None => format!("Redundant import: `{alias}` is already available in the root namespace."),
+                };
+
+                let issue = Issue::new(self.cfg.level(), message)
+                    .with_code(self.meta.code)
+                    .with_annotation(
+                        Annotation::primary(decl.item.name.span())
+                            .with_message(format!("`{alias}` does not need to be imported.")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(use_stmt.r#use.span()).with_message("Redundant `use` statement."),
+                    )
+                    .with_help("Remove the import; the symbol is already accessible without it.");
+
+                ctx.collector.propose(issue, |edits| {
+                    if let Some(range) = utils::calculate_delete_range_for_item(decl.parent_stmt, decl.item) {
+                        edits.push(TextEdit::delete(range));
+                    }
+                });
+            }
+        }
+
         let grouped_by_parent = use_declarations.into_iter().fold(HashMap::new(), |mut acc, decl| {
             acc.entry(decl.parent_stmt.span()).or_insert_with(Vec::new).push(decl);
             acc
         });
 
-        for decls in grouped_by_parent.values() {
+        for (_, mut decls) in grouped_by_parent {
+            decls.retain(|d| !same_namespace_spans.contains(&d.item.span()));
+            if decls.is_empty() {
+                continue;
+            }
+
             let total_items = decls.len();
             let unused_items: Vec<_> = decls
                 .iter()
@@ -233,23 +279,29 @@ mod utils {
         pub item: &'ast UseItem<'ast>,
         pub import_type: ImportType,
         pub fqn: Atom,
+        pub namespace: Option<Atom>,
     }
 
     pub(super) fn collect_use_declarations<'ast>(program: &'ast Program<'ast>) -> Vec<UseDeclaration<'ast>> {
         let mut declarations = Vec::new();
         for stmt in &program.statements {
             if let Statement::Namespace(ns) = stmt {
+                let namespace = ns.name.as_ref().map(|n| atom(n.value()));
                 for ns_stmt in ns.statements() {
-                    collect_from_statement(ns_stmt, &mut declarations);
+                    collect_from_statement(ns_stmt, namespace, &mut declarations);
                 }
             } else {
-                collect_from_statement(stmt, &mut declarations);
+                collect_from_statement(stmt, None, &mut declarations);
             }
         }
         declarations
     }
 
-    fn collect_from_statement<'ast>(stmt: &'ast Statement<'ast>, declarations: &mut Vec<UseDeclaration<'ast>>) {
+    fn collect_from_statement<'ast>(
+        stmt: &'ast Statement<'ast>,
+        namespace: Option<Atom>,
+        declarations: &mut Vec<UseDeclaration<'ast>>,
+    ) {
         if let Statement::Use(use_stmt) = stmt {
             match &use_stmt.items {
                 UseItems::Sequence(s) => {
@@ -259,7 +311,8 @@ mod utils {
                             parent_stmt: stmt,
                             item,
                             import_type,
-                            fqn: atom(item.name.value()),
+                            fqn: atom(item.name.value().trim_start_matches('\\')),
+                            namespace,
                         });
                     }
                 }
@@ -270,12 +323,13 @@ mod utils {
                             parent_stmt: stmt,
                             item,
                             import_type,
-                            fqn: atom(item.name.value()),
+                            fqn: atom(item.name.value().trim_start_matches('\\')),
+                            namespace,
                         });
                     }
                 }
                 UseItems::MixedList(list) => {
-                    let prefix = list.namespace.value();
+                    let prefix = list.namespace.value().trim_start_matches('\\');
                     for i in &list.items.nodes {
                         let import_type = match i.r#type.as_ref() {
                             Some(t) if t.is_function() => ImportType::Function,
@@ -283,16 +337,22 @@ mod utils {
                             _ => ImportType::ClassOrNamespace,
                         };
                         let fqn = concat_atom!(prefix, "\\", i.item.name.value());
-                        declarations.push(UseDeclaration { parent_stmt: stmt, item: &i.item, import_type, fqn });
+                        declarations.push(UseDeclaration {
+                            parent_stmt: stmt,
+                            item: &i.item,
+                            import_type,
+                            fqn,
+                            namespace,
+                        });
                     }
                 }
                 UseItems::TypedList(list) => {
-                    let prefix = list.namespace.value();
+                    let prefix = list.namespace.value().trim_start_matches('\\');
                     let import_type =
                         if list.r#type.is_function() { ImportType::Function } else { ImportType::Constant };
                     for item in &list.items.nodes {
                         let fqn = concat_atom!(prefix, "\\", item.name.value());
-                        declarations.push(UseDeclaration { parent_stmt: stmt, item, import_type, fqn });
+                        declarations.push(UseDeclaration { parent_stmt: stmt, item, import_type, fqn, namespace });
                     }
                 }
             }
@@ -327,6 +387,27 @@ mod utils {
         }
 
         false
+    }
+
+    /// Check if an import is from the same namespace it appears in.
+    ///
+    /// Returns `true` if:
+    /// - Both are in root namespace (import has no backslash, current namespace is None)
+    /// - Import's parent namespace matches the current namespace
+    pub(super) fn is_same_namespace_import(decl: &UseDeclaration<'_>) -> bool {
+        let fqn = decl.fqn.as_str();
+
+        // Get the namespace part of the FQN (everything before the last segment)
+        let import_namespace = fqn.rfind('\\').map(|pos| &fqn[..pos]);
+
+        match (&decl.namespace, import_namespace) {
+            // Both in root namespace
+            (None, None) => true,
+            // Current namespace matches import's parent namespace (case-insensitive)
+            (Some(ns), Some(import_ns)) => ns.as_str().eq_ignore_ascii_case(import_ns),
+            // One is root, other is not
+            _ => false,
+        }
     }
 
     pub(super) fn get_docblocks<'arena>(program: &Program<'arena>) -> Vec<&'arena str> {
@@ -404,5 +485,355 @@ mod utils {
             let comma_span = list.items.tokens[index].span;
             typed_item_span.join(comma_span)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use indoc::indoc;
+
+    use super::NoRedundantUseRule;
+    use crate::integration::Integration;
+    use crate::integration::IntegrationSet;
+    use crate::settings::Settings;
+    use crate::test_lint_failure;
+    use crate::test_lint_success;
+
+    test_lint_success! {
+        name = used_import_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace App;
+
+            use App\Helpers\ArrayHelper;
+
+            $result = ArrayHelper::combine([]);
+        "}
+    }
+
+    test_lint_success! {
+        name = used_import_with_leading_backslash_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use \DOMDocument;
+
+            $_ = new DOMDocument();
+        "}
+    }
+
+    test_lint_success! {
+        name = multiple_used_imports_with_leading_backslash,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use \DOMDocument;
+            use \DOMElement;
+
+            $doc = new DOMDocument();
+            $elem = new DOMElement('div');
+        "}
+    }
+
+    test_lint_success! {
+        name = function_import_with_leading_backslash_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use function \array_map;
+
+            $_ = array_map(fn($x) => $x, []);
+        "}
+    }
+
+    test_lint_success! {
+        name = const_import_with_leading_backslash_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use const \PHP_VERSION;
+
+            $_ = PHP_VERSION;
+        "}
+    }
+
+    test_lint_success! {
+        name = tempest_inline_usage,
+        rule = NoRedundantUseRule,
+        filename = "test.view.php",
+        settings = |settings: &mut Settings| {
+            settings.integrations = IntegrationSet::only(Integration::Tempest);
+        },
+        code = indoc! {r#"
+            <?php
+
+            use Tests\Tempest\Fixtures\Modules\Home\HomeController;
+            use function Tempest\Router\uri;
+
+            ?>
+
+            {{ uri(HomeController::class) }}
+        "#}
+    }
+
+    test_lint_failure! {
+        name = unused_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace App;
+
+            use App\Helpers\StringHelper;
+
+            $result = [];
+        "}
+    }
+
+    test_lint_failure! {
+        name = unused_import_with_leading_backslash_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use \DOMDocument;
+
+            $_ = 'no usage';
+        "}
+    }
+
+    test_lint_failure! {
+        name = unused_function_import_with_leading_backslash_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use function \array_map;
+
+            $_ = [];
+        "}
+    }
+
+    test_lint_failure! {
+        name = unused_const_import_with_leading_backslash_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Example;
+
+            use const \PHP_VERSION;
+
+            $_ = 1;
+        "}
+    }
+
+    test_lint_failure! {
+        name = partially_unused_imports,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace App;
+
+            use App\Helpers\ArrayHelper;
+            use App\Helpers\StringHelper;
+
+            $result = ArrayHelper::combine([]);
+        "}
+    }
+
+    test_lint_success! {
+        name = different_namespace_import_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Foo\Bar;
+
+            use Foo\Baz\Qux;
+
+            $_ = new Qux();
+        "}
+    }
+
+    test_lint_success! {
+        name = root_import_in_namespace_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace App;
+
+            use RuntimeException;
+
+            throw new RuntimeException('error');
+        "}
+    }
+
+    test_lint_success! {
+        name = parent_namespace_import_is_not_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Foo\Bar\Baz;
+
+            use Foo\Bar\Qux;
+
+            $_ = new Qux();
+        "}
+    }
+
+    test_lint_failure! {
+        name = same_namespace_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Foo\Bar;
+
+            use Foo\Bar\Baz;
+
+            $_ = new Baz();
+        "}
+    }
+
+    test_lint_failure! {
+        name = same_namespace_function_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Foo\Bar;
+
+            use function Foo\Bar\qux;
+
+            qux();
+        "}
+    }
+
+    test_lint_failure! {
+        name = same_namespace_const_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace Foo\Bar;
+
+            use const Foo\Bar\QUXX;
+
+            echo QUXX;
+        "}
+    }
+
+    test_lint_failure! {
+        name = root_namespace_class_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            use Foo;
+
+            $_ = new Foo();
+        "}
+    }
+
+    test_lint_failure! {
+        name = root_namespace_function_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            use function strlen;
+
+            echo strlen('hello');
+        "}
+    }
+
+    test_lint_failure! {
+        name = root_namespace_const_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            use const PHP_VERSION;
+
+            echo PHP_VERSION;
+        "}
+    }
+
+    test_lint_failure! {
+        name = braced_root_namespace_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace {
+                use RuntimeException;
+
+                throw new RuntimeException('error');
+            }
+        "}
+    }
+
+    test_lint_failure! {
+        name = braced_root_namespace_function_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace {
+                use function strlen;
+
+                echo strlen('a');
+            }
+        "}
+    }
+
+    test_lint_failure! {
+        name = braced_root_namespace_const_import_is_redundant,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace {
+                use const PHP_VERSION_ID;
+
+                echo PHP_VERSION_ID;
+            }
+        "}
+    }
+
+    test_lint_failure! {
+        name = same_namespace_import_case_insensitive,
+        rule = NoRedundantUseRule,
+        code = indoc! {r"
+            <?php
+
+            namespace foo\bar;
+
+            use Foo\Bar\Baz;
+
+            $_ = new Baz();
+        "}
     }
 }

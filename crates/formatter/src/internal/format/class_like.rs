@@ -67,6 +67,13 @@ pub fn print_class_like_body<'arena>(
             let mut last_has_line_after = false;
             let mut members = vec![in f.arena; Document::Line(Line::hard())];
 
+            // If enabled, add an empty line directly after the opening brace.
+            // This forces a blank line between the `{` and the first member
+            // regardless of the original source layout.
+            if f.settings.empty_line_after_class_like_open {
+                members.push(Document::Line(Line::hard()));
+            }
+
             // Conditionally sort members if sort_class_methods is enabled
             let members_to_format = if f.settings.sort_class_methods {
                 sort_class_members(f.arena, class_like_members)
@@ -191,6 +198,10 @@ pub fn print_class_like_body<'arena>(
             contents.push(Document::Line(Line::hard()));
         }
 
+        if length > 0 && f.settings.empty_line_before_class_like_close {
+            contents.push(Document::Line(Line::hard()));
+        }
+
         contents.push(Document::String("}"));
         if let Some(comments) = f.print_trailing_comments(*right_brace) {
             contents.push(comments);
@@ -207,6 +218,7 @@ pub fn print_class_like_body<'arena>(
             match anonymous_class_signature_id {
                 Some(signature_id) => match f.settings.closure_brace_style {
                     BraceStyle::SameLine => Document::space(),
+                    BraceStyle::AlwaysNextLine => Document::Array(vec![in f.arena; Document::Line(Line::hard()), Document::BreakParent]),
                     BraceStyle::NextLine => Document::IfBreak(
                         IfBreak::new(
                             f.arena,
@@ -218,7 +230,7 @@ pub fn print_class_like_body<'arena>(
                 },
                 None => match f.settings.classlike_brace_style {
                     BraceStyle::SameLine => Document::space(),
-                    BraceStyle::NextLine => Document::Array(vec![in f.arena; Document::Line(Line::hard()), Document::BreakParent]),
+                    BraceStyle::NextLine | BraceStyle::AlwaysNextLine => Document::Array(vec![in f.arena; Document::Line(Line::hard()), Document::BreakParent]),
                 },
             }
         },

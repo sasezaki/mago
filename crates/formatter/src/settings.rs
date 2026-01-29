@@ -1,10 +1,17 @@
 use std::str::FromStr;
 
+use crate::presets;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
 /// Format settings for the PHP printer.
+///
+/// **WARNING:** This structure is not to be considered exhaustive. New fields may be added in minor
+/// or patch releases. Do not construct this structure directly outside of the formatter crate.
+///
+/// New fields are added with default values to ensure backward compatibility,
+/// unless a breaking change is explicitly intended for PER-CS compliance updates.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, PartialOrd, Ord, JsonSchema)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct FormatSettings {
@@ -81,6 +88,12 @@ pub struct FormatSettings {
     /// Default: `same_line`
     #[serde(default = "BraceStyle::same_line")]
     pub control_brace_style: BraceStyle,
+
+    /// Whether to place `else`, `elseif`, `catch` and `finally` on a new line.
+    ///
+    /// Default: false
+    #[serde(default = "default_false")]
+    pub following_clause_on_newline: bool,
 
     /// Brace placement for closures.
     ///
@@ -159,15 +172,15 @@ pub struct FormatSettings {
     /// }
     /// ```
     ///
-    /// Example with `next_line`:
+    /// Example with `next_line` or `always_next_line`:
     /// ```php
     /// class Foo
     /// {
     /// }
     /// ```
     ///
-    /// Default: `next_line`
-    #[serde(default = "BraceStyle::next_line")]
+    /// Default: `always_next_line`
+    #[serde(default = "BraceStyle::always_next_line")]
     pub classlike_brace_style: BraceStyle,
 
     /// Place empty control structure bodies on the same line.
@@ -284,8 +297,8 @@ pub struct FormatSettings {
     /// class Foo {}
     /// ```
     ///
-    /// Default: false
-    #[serde(default = "default_false")]
+    /// Default: true
+    #[serde(default = "default_true")]
     pub inline_empty_classlike_braces: bool,
 
     /// Place empty anonymous class bodies on the same line.
@@ -692,6 +705,15 @@ pub struct FormatSettings {
     #[serde(default = "default_false")]
     pub space_before_hook_parameter_list_parenthesis: bool,
 
+    /// Whether to keep abstract property hooks inline.
+    ///
+    /// When enabled: `public int $id { get; }`
+    /// When disabled: hook list is always expanded
+    ///
+    /// Default: true ([PER-CS 4.10](https://www.php-fig.org/per/coding-style/#410-interface-and-abstract-properties) compliant)
+    #[serde(default = "default_true")]
+    pub inline_abstract_property_hooks: bool,
+
     /// Whether to add a space before the opening parenthesis in closure use clause.
     ///
     /// When enabled: `function() use ($var)`
@@ -871,6 +893,23 @@ pub struct FormatSettings {
     #[serde(default = "default_false")]
     pub empty_line_after_class_like_constant: bool,
 
+    /// Whether to add an empty line immediately after a class-like opening brace.
+    ///
+    /// Default: false
+    #[serde(default = "default_false")]
+    pub empty_line_after_class_like_open: bool,
+
+    /// Whether to insert an empty line before the closing brace of class-like
+    /// structures when the class body is not empty.
+    ///
+    /// When enabled, a blank line will be inserted immediately before the `}`
+    /// that closes a class, trait, interface or enum, but only if the body
+    /// contains at least one member.
+    ///
+    /// Default: false
+    #[serde(default = "default_false")]
+    pub empty_line_before_class_like_close: bool,
+
     /// Whether to add an empty line after enum case.
     ///
     /// Note: if an empty line already exists, it will be preserved regardless of this
@@ -924,85 +963,131 @@ pub struct FormatSettings {
     /// Default: true
     #[serde(default = "default_true")]
     pub separate_class_like_members: bool,
+
+    /// Whether to indent heredoc/nowdoc content.
+    ///
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub indent_heredoc: bool,
+
+    /// Whether to print boolean and null literals in upper-case (e.g. `TRUE`, `FALSE`, `NULL`).
+    /// When enabled these literals are printed in uppercase; when disabled they are printed
+    /// in lowercase.
+    ///
+    /// Default: false
+    #[serde(default = "default_false")]
+    pub uppercase_literal_keyword: bool,
 }
 
 impl Default for FormatSettings {
     /// Sets default values to align with best practices.
+    ///
+    /// This uses the default preset from the presets module to ensure consistency.
     fn default() -> Self {
-        Self {
-            print_width: default_print_width(),
-            tab_width: default_tab_width(),
-            use_tabs: false,
-            end_of_line: EndOfLine::default(),
-            single_quote: true,
-            trailing_comma: true,
-            closure_brace_style: BraceStyle::SameLine,
-            function_brace_style: BraceStyle::NextLine,
-            method_brace_style: BraceStyle::NextLine,
-            classlike_brace_style: BraceStyle::NextLine,
-            control_brace_style: BraceStyle::SameLine,
-            inline_empty_control_braces: false,
-            inline_empty_closure_braces: true,
-            inline_empty_function_braces: false,
-            inline_empty_method_braces: false,
-            inline_empty_constructor_braces: true,
-            inline_empty_classlike_braces: false,
-            inline_empty_anonymous_class_braces: true,
-            null_type_hint: NullTypeHint::default(),
-            break_promoted_properties_list: true,
-            method_chain_breaking_style: MethodChainBreakingStyle::NextLine,
-            first_method_chain_on_new_line: true,
-            line_before_binary_operator: true,
-            sort_uses: true,
-            sort_class_methods: false,
-            separate_use_types: true,
-            expand_use_groups: true,
-            remove_trailing_close_tag: true,
-            parentheses_around_new_in_member_access: false,
-            parentheses_in_new_expression: true,
-            parentheses_in_exit_and_die: true,
-            parentheses_in_attribute: false,
-            array_table_style_alignment: true,
-            align_assignment_like: false,
-            always_break_named_arguments_list: false,
-            always_break_attribute_named_argument_lists: false,
-            preserve_breaking_member_access_chain: false,
-            preserve_breaking_argument_list: false,
-            preserve_breaking_array_like: true,
-            preserve_breaking_parameter_list: false,
-            preserve_breaking_attribute_list: false,
-            preserve_breaking_conditional_expression: false,
-            space_before_arrow_function_parameter_list_parenthesis: false,
-            space_before_closure_parameter_list_parenthesis: true,
-            space_before_closure_use_clause_parenthesis: true,
-            space_around_assignment_in_declare: false,
-            space_within_grouping_parenthesis: false,
-            space_before_hook_parameter_list_parenthesis: false,
-            space_around_concatenation_binary_operator: true,
-            space_after_cast_unary_prefix_operators: true,
-            space_after_reference_unary_prefix_operator: false,
-            space_after_error_control_unary_prefix_operator: false,
-            space_after_logical_not_unary_prefix_operator: false,
-            space_after_bitwise_not_unary_prefix_operator: false,
-            space_after_increment_unary_prefix_operator: false,
-            space_after_decrement_unary_prefix_operator: false,
-            space_after_additive_unary_prefix_operator: false,
-            empty_line_after_control_structure: false,
-            empty_line_after_opening_tag: true,
-            empty_line_after_declare: true,
-            empty_line_after_namespace: true,
-            empty_line_after_use: true,
-            empty_line_after_symbols: true,
-            empty_line_between_same_symbols: true,
-            empty_line_after_class_like_constant: false,
-            empty_line_after_enum_case: false,
-            empty_line_after_trait_use: false,
-            empty_line_after_property: false,
-            empty_line_after_method: true,
-            empty_line_before_return: false,
-            empty_line_before_dangling_comments: true,
-            separate_class_like_members: true,
-        }
+        presets::FormatterPreset::Default.settings()
+    }
+}
+
+/// Merges individual settings over a preset, applying overrides where individual
+/// settings differ from the default values (indicating they were explicitly set).
+pub fn merge_format_settings(preset: FormatSettings, individual: FormatSettings) -> FormatSettings {
+    let defaults = FormatSettings::default();
+
+    macro_rules! merge_fields {
+        ($($field:ident),* $(,)?) => {
+            FormatSettings {
+                $(
+                    $field: if individual.$field != defaults.$field {
+                        // User explicitly set this value (differs from default)
+                        individual.$field
+                    } else {
+                        // Use preset value
+                        preset.$field
+                    },
+                )*
+            }
+        };
+    }
+
+    merge_fields! {
+        print_width,
+        tab_width,
+        use_tabs,
+        end_of_line,
+        single_quote,
+        trailing_comma,
+        remove_trailing_close_tag,
+        control_brace_style,
+        following_clause_on_newline,
+        closure_brace_style,
+        function_brace_style,
+        method_brace_style,
+        classlike_brace_style,
+        inline_empty_control_braces,
+        inline_empty_closure_braces,
+        inline_empty_function_braces,
+        inline_empty_method_braces,
+        inline_empty_constructor_braces,
+        inline_empty_classlike_braces,
+        inline_empty_anonymous_class_braces,
+        method_chain_breaking_style,
+        first_method_chain_on_new_line,
+        preserve_breaking_member_access_chain,
+        preserve_breaking_argument_list,
+        preserve_breaking_array_like,
+        preserve_breaking_parameter_list,
+        preserve_breaking_attribute_list,
+        preserve_breaking_conditional_expression,
+        break_promoted_properties_list,
+        line_before_binary_operator,
+        always_break_named_arguments_list,
+        always_break_attribute_named_argument_lists,
+        array_table_style_alignment,
+        align_assignment_like,
+        sort_uses,
+        sort_class_methods,
+        separate_use_types,
+        expand_use_groups,
+        null_type_hint,
+        parentheses_around_new_in_member_access,
+        parentheses_in_new_expression,
+        parentheses_in_exit_and_die,
+        parentheses_in_attribute,
+        space_before_arrow_function_parameter_list_parenthesis,
+        space_before_closure_parameter_list_parenthesis,
+        space_before_hook_parameter_list_parenthesis,
+        inline_abstract_property_hooks,
+        space_before_closure_use_clause_parenthesis,
+        space_after_cast_unary_prefix_operators,
+        space_after_reference_unary_prefix_operator,
+        space_after_error_control_unary_prefix_operator,
+        space_after_logical_not_unary_prefix_operator,
+        space_after_bitwise_not_unary_prefix_operator,
+        space_after_increment_unary_prefix_operator,
+        space_after_decrement_unary_prefix_operator,
+        space_after_additive_unary_prefix_operator,
+        space_around_concatenation_binary_operator,
+        space_around_assignment_in_declare,
+        space_within_grouping_parenthesis,
+        empty_line_after_control_structure,
+        empty_line_after_opening_tag,
+        empty_line_after_declare,
+        empty_line_after_namespace,
+        empty_line_after_use,
+        empty_line_after_symbols,
+        empty_line_between_same_symbols,
+        empty_line_after_class_like_constant,
+        empty_line_after_class_like_open,
+        empty_line_before_class_like_close,
+        empty_line_after_enum_case,
+        empty_line_after_trait_use,
+        empty_line_after_property,
+        empty_line_after_method,
+        empty_line_before_return,
+        empty_line_before_dangling_comments,
+        separate_class_like_members,
+        indent_heredoc,
+        uppercase_literal_keyword,
     }
 }
 
@@ -1032,21 +1117,29 @@ pub enum EndOfLine {
     Cr,
 }
 
-/// Specifies the style of line endings.
+/// Specifies brace placement style for various constructs.
+///
+/// - `SameLine`: Opening brace on the same line as the declaration
+/// - `NextLine`: Opening brace on the next line for single-line signatures;
+///   on the same line when the signature breaks across multiple lines
+/// - `AlwaysNextLine`: Opening brace always on the next line, regardless of
+///   whether the signature breaks
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, PartialOrd, Ord, JsonSchema)]
 pub enum BraceStyle {
-    #[serde(alias = "same_line")]
+    #[serde(alias = "same_line", alias = "same-line")]
     SameLine,
-    #[serde(alias = "next_line")]
+    #[serde(alias = "next_line", alias = "next-line")]
     NextLine,
+    #[serde(alias = "always_next_line", alias = "always-next-line")]
+    AlwaysNextLine,
 }
 
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq, Hash, Serialize, Deserialize, PartialOrd, Ord, JsonSchema)]
 pub enum MethodChainBreakingStyle {
-    #[serde(alias = "same_line")]
+    #[serde(alias = "same_line", alias = "same-line")]
     SameLine,
     #[default]
-    #[serde(alias = "next_line")]
+    #[serde(alias = "next_line", alias = "next-line")]
     NextLine,
 }
 
@@ -1061,10 +1154,21 @@ impl BraceStyle {
         Self::NextLine
     }
 
+    #[must_use]
+    pub fn always_next_line() -> Self {
+        Self::AlwaysNextLine
+    }
+
     #[inline]
     #[must_use]
     pub fn is_next_line(&self) -> bool {
         *self == Self::NextLine
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_always_next_line(&self) -> bool {
+        *self == Self::AlwaysNextLine
     }
 }
 

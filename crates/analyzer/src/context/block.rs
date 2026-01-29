@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use ahash::HashSet;
@@ -24,7 +23,8 @@ use mago_span::Span;
 
 use crate::common::global::get_super_globals;
 use crate::context::Context;
-use crate::context::scope::control_action::ControlAction;
+use crate::context::block_flags::BlockContextFlags;
+use crate::context::scope::control_action::ControlActionSet;
 use crate::context::scope::finally_scope::FinallyScope;
 use crate::context::scope::var_has_root;
 use crate::reconciler::assertion_reconciler;
@@ -54,7 +54,7 @@ pub struct ReferenceConstraint {
 #[derive(Clone, Debug)]
 pub struct BlockContext<'ctx> {
     pub scope: ScopeContext<'ctx>,
-    pub locals: BTreeMap<Atom, Rc<TUnion>>,
+    pub locals: AtomMap<Rc<TUnion>>,
     pub static_locals: AtomSet,
     pub variables_possibly_in_scope: AtomSet,
     pub conditionally_referenced_variable_ids: AtomSet,
@@ -83,32 +83,19 @@ pub struct BlockContext<'ctx> {
     /// where the key is the variable name and the value is the reference constraint.
     pub by_reference_constraints: AtomMap<ReferenceConstraint>,
 
-    pub inside_conditional: bool,
-    pub inside_isset: bool,
-    pub inside_unset: bool,
-    pub inside_general_use: bool,
-    pub inside_return: bool,
-    pub inside_throw: bool,
-    pub inside_assignment: bool,
-    pub inside_assignment_operation: bool,
-    pub inside_loop: bool,
-    pub inside_call: bool,
-    pub inside_nullsafe_chain: bool,
-    pub inside_try: bool,
-    pub inside_loop_expressions: bool,
-    pub inside_negation: bool,
-    pub inside_variable_reference: bool,
+    /// Bitflags for various context states (inside_conditional, inside_isset, etc.)
+    pub flags: BlockContextFlags,
+
     pub clauses: Vec<Rc<Clause>>,
     pub reconciled_expression_clauses: Vec<Rc<Clause>>,
     pub known_functions: AtomSet,
     pub known_constants: AtomSet,
     pub break_types: Vec<BreakContext>,
     pub finally_scope: Option<Rc<RefCell<FinallyScope>>>,
-    pub has_returned: bool,
     pub parent_conflicting_clause_variables: AtomSet,
     pub loop_bounds: (u32, u32),
     pub if_body_context: Option<Rc<RefCell<Self>>>,
-    pub control_actions: HashSet<ControlAction>,
+    pub control_actions: ControlActionSet,
     pub possibly_thrown_exceptions: AtomMap<HashSet<Span>>,
 
     /// Properties that are DEFINITELY initialized in ALL code paths.
@@ -126,13 +113,6 @@ pub struct BlockContext<'ctx> {
     /// Methods called on $this in at least one path.
     /// Uses union semantics.
     pub called_methods: HashSet<Atom>,
-
-    /// Flag indicating we're collecting initialization data (only in constructors).
-    pub collect_initializations: bool,
-
-    /// Set to true if this method calls `parent::`__`construct()`.
-    /// Used to include parent constructor's property initializations.
-    pub calls_parent_constructor: bool,
 
     /// If this method calls `parent::`<method>() where <method> is a class initializer,
     /// this holds the initializer method name.
@@ -175,7 +155,7 @@ impl<'ctx> BlockContext<'ctx> {
     pub fn new(scope: ScopeContext<'ctx>, register_super_globals: bool) -> Self {
         let mut block_context = Self {
             scope,
-            locals: BTreeMap::new(),
+            locals: AtomMap::default(),
             static_locals: AtomSet::default(),
             variables_possibly_in_scope: AtomSet::default(),
             conditionally_referenced_variable_ids: AtomSet::default(),
@@ -186,39 +166,22 @@ impl<'ctx> BlockContext<'ctx> {
             references_to_external_scope: AtomSet::default(),
             references_possibly_from_confusing_scope: AtomSet::default(),
             by_reference_constraints: AtomMap::default(),
-            inside_conditional: false,
-            inside_isset: false,
-            inside_unset: false,
-            inside_general_use: false,
-            inside_return: false,
-            inside_throw: false,
-            inside_assignment: false,
-            inside_assignment_operation: false,
-            inside_loop_expressions: false,
-            inside_negation: false,
-            inside_call: false,
-            inside_nullsafe_chain: false,
-            inside_try: false,
-            inside_variable_reference: false,
-            has_returned: false,
+            flags: BlockContextFlags::new(),
             clauses: Vec::new(),
             reconciled_expression_clauses: Vec::new(),
             known_functions: AtomSet::default(),
             known_constants: AtomSet::default(),
             break_types: Vec::new(),
-            inside_loop: false,
             finally_scope: None,
             parent_conflicting_clause_variables: AtomSet::default(),
             loop_bounds: (0, 0),
             if_body_context: None,
-            control_actions: HashSet::default(),
+            control_actions: ControlActionSet::new(),
             possibly_thrown_exceptions: AtomMap::default(),
             definitely_initialized_properties: AtomSet::default(),
             possibly_initialized_properties: AtomSet::default(),
             definitely_called_methods: HashSet::default(),
             called_methods: HashSet::default(),
-            collect_initializations: false,
-            calls_parent_constructor: false,
             calls_parent_initializer: None,
         };
 
@@ -255,10 +218,10 @@ impl<'ctx> BlockContext<'ctx> {
 
     pub fn get_redefined_locals(
         &self,
-        new_locals: &BTreeMap<Atom, Rc<TUnion>>,
+        new_locals: &AtomMap<Rc<TUnion>>,
         include_new_vars: bool,
         removed_vars: &mut AtomSet,
-    ) -> AtomMap<TUnion> {
+    ) -> AtomMap<Rc<TUnion>> {
         let mut redefined_vars = AtomMap::default();
 
         let mut var_ids = self.locals.keys().collect::<Vec<_>>();
@@ -268,10 +231,10 @@ impl<'ctx> BlockContext<'ctx> {
             if let Some(this_type) = self.locals.get(var_id) {
                 if let Some(new_type) = new_locals.get(var_id) {
                     if new_type != this_type {
-                        redefined_vars.insert(*var_id, (**this_type).clone());
+                        redefined_vars.insert(*var_id, this_type.clone());
                     }
                 } else if include_new_vars {
-                    redefined_vars.insert(*var_id, (**this_type).clone());
+                    redefined_vars.insert(*var_id, this_type.clone());
                 }
             } else {
                 removed_vars.insert(*var_id);
@@ -568,6 +531,10 @@ impl<'ctx> BlockContext<'ctx> {
         vars_to_update: &AtomSet,
         updated_vars: &mut AtomSet,
     ) {
+        if vars_to_update.is_empty() {
+            return;
+        }
+
         for (variable_id, old_type) in &start_block_context.locals {
             if !vars_to_update.contains(variable_id) {
                 continue;

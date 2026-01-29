@@ -18,12 +18,14 @@ use mago_atom::u64_atom;
 use mago_database::file::FileId;
 use mago_reporting::IssueCollection;
 use mago_span::Position;
+use mago_span::Span;
 
 use crate::identifier::method::MethodIdentifier;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::class_like_constant::ClassLikeConstantMetadata;
 use crate::metadata::constant::ConstantMetadata;
 use crate::metadata::enum_case::EnumCaseMetadata;
+use crate::metadata::flags::MetadataFlags;
 use crate::metadata::function_like::FunctionLikeMetadata;
 use crate::metadata::property::PropertyMetadata;
 use crate::metadata::ttype::TypeMetadata;
@@ -53,6 +55,7 @@ pub mod ttype;
 /// including details about classes, interfaces, traits, enums, functions, constants,
 /// their members, inheritance, dependencies, and associated types.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CodebaseMetadata {
     /// Configuration flag: Should types be inferred based on usage patterns?
     pub infer_types_from_usage: bool,
@@ -79,15 +82,12 @@ pub struct CodebaseMetadata {
 }
 
 impl CodebaseMetadata {
-    // Construction
-
     /// Creates a new, empty `CodebaseMetadata` with default values.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
-    // Symbol Existence Checks
 
     /// Checks if a class exists in the codebase (case-insensitive).
     ///
@@ -134,6 +134,14 @@ impl CodebaseMetadata {
     pub fn class_like_exists(&self, name: &str) -> bool {
         let lowercase_name = ascii_lowercase_atom(name);
         self.symbols.contains(&lowercase_name)
+    }
+
+    /// Checks if a namespace exists (case-insensitive).
+    #[inline]
+    #[must_use]
+    pub fn namespace_exists(&self, name: &str) -> bool {
+        let lowercase_name = ascii_lowercase_atom(name);
+        self.symbols.contains_namespace(&lowercase_name)
     }
 
     /// Checks if a class or trait exists in the codebase (case-insensitive).
@@ -235,7 +243,6 @@ impl CodebaseMetadata {
         let property_name = atom(property);
         self.class_likes.get(&lowercase_class).is_some_and(|meta| meta.properties.contains_key(&property_name))
     }
-    // Metadata Retrieval - Class-likes
 
     /// Retrieves metadata for a class (case-insensitive).
     /// Returns `None` if the name doesn't correspond to a class.
@@ -277,7 +284,6 @@ impl CodebaseMetadata {
         let lowercase_name = ascii_lowercase_atom(name);
         self.class_likes.get(&lowercase_name)
     }
-    // Metadata Retrieval - Functions & Methods
 
     /// Retrieves metadata for a global function (case-insensitive).
     #[inline]
@@ -343,7 +349,6 @@ impl CodebaseMetadata {
             FunctionLikeIdentifier::Closure(file_id, position) => self.get_closure(file_id, position),
         }
     }
-    // Metadata Retrieval - Constants
 
     /// Retrieves metadata for a global constant.
     /// Namespace lookup is case-insensitive, constant name is case-sensitive.
@@ -372,7 +377,6 @@ impl CodebaseMetadata {
         let case_name = atom(case);
         self.class_likes.get(&lowercase_class).and_then(|meta| meta.enum_cases.get(&case_name))
     }
-    // Metadata Retrieval - Properties
 
     /// Retrieves metadata for a property directly from the class where it's declared.
     /// Class name is case-insensitive, property name is case-sensitive.
@@ -588,7 +592,6 @@ impl CodebaseMetadata {
         }
         ancestors
     }
-    // Method Resolution
 
     /// Gets the class where a method is declared (following inheritance).
     #[inline]
@@ -760,7 +763,6 @@ impl CodebaseMetadata {
 
         &[]
     }
-    // Property Resolution
 
     /// Gets the class where a property is declared.
     #[inline]
@@ -872,71 +874,48 @@ impl CodebaseMetadata {
         self.file_signatures.remove(file_id)
     }
 
-    // Utility Methods
-
     /// Merges information from another `CodebaseMetadata` into this one.
+    ///
+    /// When both metadata have the same priority, the one with the smaller span is kept
+    /// for deterministic results regardless of scan order.
     pub fn extend(&mut self, other: CodebaseMetadata) {
         for (k, v) in other.class_likes {
-            let metadata_to_keep = match self.class_likes.entry(k) {
-                Entry::Occupied(entry) => {
-                    let existing = entry.remove();
-                    if v.flags.is_user_defined() {
-                        v
-                    } else if existing.flags.is_user_defined() {
-                        existing
-                    } else if v.flags.is_built_in() {
-                        v
-                    } else if existing.flags.is_built_in() {
-                        existing
-                    } else {
-                        v
+            match self.class_likes.entry(k) {
+                Entry::Occupied(mut entry) => {
+                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                        entry.insert(v);
                     }
                 }
-                Entry::Vacant(_) => v,
-            };
-            self.class_likes.insert(k, metadata_to_keep);
+                Entry::Vacant(entry) => {
+                    entry.insert(v);
+                }
+            }
         }
 
         for (k, v) in other.function_likes {
-            let metadata_to_keep = match self.function_likes.entry(k) {
-                Entry::Occupied(entry) => {
-                    let existing = entry.remove();
-                    if v.flags.is_user_defined() {
-                        v
-                    } else if existing.flags.is_user_defined() {
-                        existing
-                    } else if v.flags.is_built_in() {
-                        v
-                    } else if existing.flags.is_built_in() {
-                        existing
-                    } else {
-                        v
+            match self.function_likes.entry(k) {
+                Entry::Occupied(mut entry) => {
+                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                        entry.insert(v);
                     }
                 }
-                Entry::Vacant(_) => v,
-            };
-            self.function_likes.insert(k, metadata_to_keep);
+                Entry::Vacant(entry) => {
+                    entry.insert(v);
+                }
+            }
         }
 
         for (k, v) in other.constants {
-            let metadata_to_keep = match self.constants.entry(k) {
-                Entry::Occupied(entry) => {
-                    let existing = entry.remove();
-                    if v.flags.is_user_defined() {
-                        v
-                    } else if existing.flags.is_user_defined() {
-                        existing
-                    } else if v.flags.is_built_in() {
-                        v
-                    } else if existing.flags.is_built_in() {
-                        existing
-                    } else {
-                        v
+            match self.constants.entry(k) {
+                Entry::Occupied(mut entry) => {
+                    if should_replace_metadata(entry.get().flags, entry.get().span, v.flags, v.span) {
+                        entry.insert(v);
                     }
                 }
-                Entry::Vacant(_) => v,
-            };
-            self.constants.insert(k, metadata_to_keep);
+                Entry::Vacant(entry) => {
+                    entry.insert(v);
+                }
+            }
         }
 
         self.symbols.extend(other.symbols);
@@ -1007,4 +986,31 @@ impl Default for CodebaseMetadata {
             file_signatures: HashMap::default(),
         }
     }
+}
+
+/// Determines which metadata value to keep when merging duplicates.
+///
+/// Priority: user-defined > built-in > other. Uses smaller span as tie-breaker.
+/// Returns `true` if the new value should replace the existing one.
+fn should_replace_metadata(
+    existing_flags: MetadataFlags,
+    existing_span: Span,
+    new_flags: MetadataFlags,
+    new_span: Span,
+) -> bool {
+    let new_is_user_defined = new_flags.is_user_defined();
+    let existing_is_user_defined = existing_flags.is_user_defined();
+
+    if new_is_user_defined != existing_is_user_defined {
+        return new_is_user_defined;
+    }
+
+    let new_is_built_in = new_flags.is_built_in();
+    let existing_is_built_in = existing_flags.is_built_in();
+
+    if new_is_built_in != existing_is_built_in {
+        return new_is_built_in;
+    }
+
+    new_span < existing_span
 }

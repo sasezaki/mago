@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use mago_atom::AtomMap;
+use mago_atom::ascii_lowercase_atom;
 use mago_atom::atom;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
@@ -171,13 +172,21 @@ fn resolve_function_callable_types<'ctx, 'arena, 'artifacts>(
             return Ok(vec![]);
         };
 
+        if let FunctionLikeIdentifier::Function(function_name) = identifier {
+            artifacts.symbol_references.add_reference_to_symbol(
+                &block_context.scope,
+                ascii_lowercase_atom(function_name.as_ref()),
+                false,
+            );
+        }
+
         return Ok(vec![Cow::Owned(TCallable::Alias(identifier))]);
     }
 
-    let was_inside_call = block_context.inside_call;
-    block_context.inside_call = true;
+    let was_inside_call = block_context.flags.inside_call();
+    block_context.flags.set_inside_call(true);
     expression.analyze(context, block_context, artifacts)?;
-    block_context.inside_call = was_inside_call;
+    block_context.flags.set_inside_call(was_inside_call);
 
     let Some(expression_type) = artifacts.get_expression_type(expression) else {
         return Ok(vec![]);

@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::reference::TReference;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
+use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
@@ -88,6 +89,60 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena>(
 
     let mut artifacts = AnalysisArtifacts::new();
 
+    if let Some(return_type) = &function_like_metadata.return_type_metadata {
+        report_undefined_type_references(context, return_type);
+
+        // Only check native declaration if effective type is from docblock (to avoid duplicates)
+        if return_type.from_docblock
+            && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
+        {
+            report_undefined_type_references(context, native_return);
+        }
+    }
+
+    if let Some(effective_return) = &function_like_metadata.return_type_metadata
+        && effective_return.from_docblock
+        && let Some(native_return) = &function_like_metadata.return_type_declaration_metadata
+    {
+        let expanded_docblock =
+            expand_type_metadata(context, block_context, &mut artifacts, function_like_metadata, effective_return);
+        let expanded_native =
+            expand_type_metadata(context, block_context, &mut artifacts, function_like_metadata, native_return);
+
+        let is_compatible = union_comparator::is_contained_by(
+            context.codebase,
+            &expanded_docblock,
+            &expanded_native,
+            false,
+            false,
+            false,
+            &mut ComparisonResult::default(),
+        );
+
+        if !is_compatible {
+            let docblock_type_str = effective_return.type_union.get_id();
+            let native_type_str = native_return.type_union.get_id();
+
+            let issue = Issue::error(format!(
+                "Docblock return type `{docblock_type_str}` is incompatible with native return type `{native_type_str}`."
+            ))
+            .with_annotation(
+                Annotation::primary(native_return.span)
+                    .with_message(format!("Native return type is `{native_type_str}`...")),
+            )
+            .with_annotation(
+                Annotation::secondary(effective_return.span)
+                    .with_message(format!("...but docblock declares `{docblock_type_str}`")),
+            )
+            .with_note("The docblock return type must be compatible with the native return type declaration.")
+            .with_help(format!(
+                "Either change the docblock return type to match `{native_type_str}`, or update the native return type to be compatible with `{docblock_type_str}`."
+            ));
+
+            context.collector.report_with_code(IssueCode::DocblockTypeMismatch, issue);
+        }
+    }
+
     add_parameter_types_to_context(
         context,
         block_context,
@@ -130,7 +185,7 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena>(
     if let Some(calling_class) = block_context.scope.get_class_like_name()
         && let Some(class_like_metadata) = context.codebase.get_class_like(&calling_class)
     {
-        add_properties_to_context(context, block_context, class_like_metadata, function_like_metadata)?;
+        add_properties_to_context(context, block_context, class_like_metadata, Some(function_like_metadata))?;
     }
 
     if !function_like_metadata.flags.is_unchecked() {
@@ -139,9 +194,9 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena>(
                 analyze_statements(statements, context, block_context, &mut artifacts)?;
             }
             FunctionLikeBody::Expression(value) => {
-                block_context.inside_return = true;
+                block_context.flags.set_inside_return(true);
                 value.analyze(context, block_context, &mut artifacts)?;
-                block_context.inside_return = false;
+                block_context.flags.set_inside_return(false);
                 block_context.conditionally_referenced_variable_ids = Default::default();
 
                 let value_type =
@@ -153,7 +208,7 @@ pub fn analyze_function_like<'ctx, 'ast, 'arena>(
     }
 
     if let Some(function_metadata) = block_context.scope.get_function_like()
-        && !block_context.has_returned
+        && !block_context.flags.has_returned()
         && let Some(return_type) = &function_metadata.return_type_metadata
         && !return_type.type_union.is_void()
         && !function_like_metadata.flags.has_yield()
@@ -208,29 +263,82 @@ fn add_parameter_types_to_context<'ctx, 'arena>(
     for (i, parameter_metadata) in function_like_metadata.parameters.iter().enumerate() {
         let parameter_variable_str = parameter_metadata.get_name().0;
 
-        let declared_parameter_type = if let Some(type_metadata) = parameter_metadata.get_type_metadata() {
-            expand_type_metadata(context, block_context, artifacts, function_like_metadata, type_metadata)
+        if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
+            report_undefined_type_references(context, parameter_type);
+
+            // Only check native declaration if effective type is from docblock (to avoid duplicates)
+            if parameter_type.from_docblock
+                && let Some(native_type) = parameter_metadata.get_type_declaration_metadata()
+            {
+                report_undefined_type_references(context, native_type);
+            }
+        }
+
+        let declared_parameter_type = if let Some(parameter_type) = parameter_metadata.get_type_metadata() {
+            let effective_type =
+                expand_type_metadata(context, block_context, artifacts, function_like_metadata, parameter_type);
+
+            if parameter_type.from_docblock
+                && let Some(native_type) = parameter_metadata.get_type_declaration_metadata()
+            {
+                let expanded_native =
+                    expand_type_metadata(context, block_context, artifacts, function_like_metadata, native_type);
+
+                let is_compatible = union_comparator::is_contained_by(
+                    context.codebase,
+                    &effective_type,
+                    &expanded_native,
+                    false,
+                    false,
+                    false,
+                    &mut ComparisonResult::default(),
+                );
+
+                if !is_compatible {
+                    let docblock_type_str = effective_type.get_id();
+                    let native_type_str = native_type.type_union.get_id();
+                    let param_name = parameter_metadata.name.0;
+
+                    let issue = Issue::error(format!(
+                        "Docblock type `{docblock_type_str}` for parameter `{param_name}` is incompatible with native type `{native_type_str}`."
+                    ))
+                    .with_annotation(
+                        Annotation::primary(native_type.span)
+                            .with_message(format!("Native type is `{native_type_str}`...")),
+                    )
+                    .with_annotation(
+                        Annotation::secondary(parameter_type.span)
+                            .with_message(format!("...but docblock declares `{docblock_type_str}`")),
+                    )
+                    .with_note("The docblock type must be compatible with the native type declaration.")
+                    .with_help(format!(
+                        "Either change the docblock type to match `{native_type_str}`, or update the native type to be compatible with `{docblock_type_str}`."
+                    ));
+
+                    context.collector.report_with_code(IssueCode::DocblockTypeMismatch, issue);
+                }
+            }
+
+            effective_type
         } else {
             get_mixed()
         };
 
+        // TODO(azjezz): consider comparing declared and inferred types instead
+        // and choosing the more specific one, this current solution is a bit naive.
         let declared_type_is_specific = parameter_metadata.get_type_metadata().is_some_and(|tm| {
             let union = &tm.type_union;
-            union.is_list() || (!union.is_mixed() && !union.is_vanilla_mixed() && !union.is_array())
+
+            !union.is_vanilla_array() && !union.is_vanilla_mixed()
         });
 
         let mut final_parameter_type = if declared_type_is_specific {
             declared_parameter_type
-        } else if let Some(inferred_map) = inferred_parameter_types.as_mut() {
-            if let Some(inferred_type) = inferred_map.remove(&i) {
-                if is_unresolved_template_with_mixed_bound(&inferred_type) {
-                    declared_parameter_type
-                } else {
-                    inferred_type
-                }
-            } else {
-                declared_parameter_type
-            }
+        } else if let Some(inferred_map) = inferred_parameter_types.as_mut()
+            && let Some(inferred_type) = inferred_map.remove(&i)
+            && !is_unresolved_template_with_mixed_bound(&inferred_type)
+        {
+            inferred_type
         } else {
             declared_parameter_type
         };
@@ -345,11 +453,11 @@ fn expand_type_metadata<'ctx>(
     signature_union
 }
 
-fn add_properties_to_context<'ctx>(
+pub(super) fn add_properties_to_context<'ctx>(
     context: &Context<'ctx, '_>,
     block_context: &mut BlockContext<'ctx>,
     class_like_metadata: &'ctx ClassLikeMetadata,
-    function_like_metadata: &'ctx FunctionLikeMetadata,
+    function_like_metadata: Option<&'ctx FunctionLikeMetadata>,
 ) -> Result<(), AnalysisError> {
     let Some(calling_class) = block_context.scope.get_class_like_name() else {
         return Ok(());
@@ -391,7 +499,7 @@ fn add_properties_to_context<'ctx>(
         let expression_id = if property_metadata.flags.is_static() {
             Atom::from(&format!("{}::${raw_property_name}", class_like_metadata.name))
         } else {
-            let this_type = get_this_type(context, class_like_metadata, Some(function_like_metadata));
+            let this_type = get_this_type(context, class_like_metadata, function_like_metadata);
 
             property_type = localize_property_type(
                 context,
@@ -414,11 +522,8 @@ fn add_properties_to_context<'ctx>(
             &TypeExpansionOptions {
                 self_class: Some(calling_class),
                 static_class_type: StaticClassType::Name(calling_class),
-                function_is_final: if let Some(method_metadata) = &function_like_metadata.method_metadata {
-                    method_metadata.is_final
-                } else {
-                    false
-                },
+                function_is_final: function_like_metadata
+                    .is_some_and(|m| m.method_metadata.as_ref().is_some_and(|metadata| metadata.is_final)),
                 expand_generic: true,
                 ..Default::default()
             },
@@ -799,6 +904,34 @@ pub fn check_unused_function_template_parameters<'ctx>(
             .with_help(format!(
                 "Remove the unused `@template {template_name}` from the docblock, or use it in a parameter or return type."
             )),
+        );
+    }
+}
+
+/// Reports errors for any undefined type references in the given type metadata.
+///
+/// This function scans the type union for unresolved `TReference::Symbol` entries,
+/// which indicate types that were not found during the population phase.
+pub fn report_undefined_type_references(context: &mut Context<'_, '_>, type_metadata: &TypeMetadata) {
+    if type_metadata.inferred {
+        return;
+    }
+
+    for type_ref in type_metadata.type_union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Reference(TReference::Symbol { name, .. })) = type_ref else {
+            continue;
+        };
+
+        context.collector.report_with_code(
+            IssueCode::NonExistentClassLike,
+            Issue::error(format!("Cannot find class, interface, enum, or type alias `{name}`."))
+                .with_annotation(
+                    Annotation::primary(type_metadata.span)
+                        .with_message(format!("`{name}` is not defined in the current codebase")),
+                )
+                .with_note("This error occurs when a type is referenced but not found in any analyzed source files or stubs.")
+                .with_note("If this type comes from an optional dependency or extension, you can safely suppress this issue using `@mago-ignore` or `@mago-expect`.")
+                .with_help("Verify the type name is spelled correctly, the file containing it is included in analysis, and any required `use` statements are present."),
         );
     }
 }

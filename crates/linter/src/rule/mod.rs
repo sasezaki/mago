@@ -178,6 +178,10 @@ macro_rules! define_rules {
 
 define_rules! {
     AmbiguousFunctionCall(ambiguous_function_call @ AmbiguousFunctionCallRule),
+    UseDedicatedExpectation(use_dedicated_expectation @ UseDedicatedExpectationRule),
+    UseSimplerExpectation(use_simpler_expectation @ UseSimplerExpectationRule),
+    UseSpecificExpectations(use_specific_expectations @ UseSpecificExpectationsRule),
+    NoOnly(no_only @ NoOnlyRule),
     ArrayStyle(array_style @ ArrayStyleRule),
     AssertDescription(assert_description @ AssertDescriptionRule),
     AssertionStyle(assertion_style @ AssertionStyleRule),
@@ -241,6 +245,7 @@ define_rules! {
     NoEval(no_eval @ NoEvalRule),
     NoErrorControlOperator(no_error_control_operator @ NoErrorControlOperatorRule),
     NoEmpty(no_empty @ NoEmptyRule),
+    NoIsset(no_isset @ NoIssetRule),
     NoEmptyLoop(no_empty_loop @ NoEmptyLoopRule),
     NoEmptyComment(no_empty_comment @ NoEmptyCommentRule),
     NoEmptyCatchClause(no_empty_catch_clause @ NoEmptyCatchClauseRule),
@@ -248,6 +253,7 @@ define_rules! {
     NoClosingTag(no_closing_tag @ NoClosingTagRule),
     NoBooleanLiteralComparison(no_boolean_literal_comparison @ NoBooleanLiteralComparisonRule),
     NoBooleanFlagParameter(no_boolean_flag_parameter @ NoBooleanFlagParameterRule),
+    NoAssignInArgument(no_assign_in_argument @ NoAssignInArgumentRule),
     NoAssignInCondition(no_assign_in_condition @ NoAssignInConditionRule),
     NoAliasFunction(no_alias_function @ NoAliasFunctionRule),
     LowercaseTypeHint(lowercase_type_hint @ LowercaseTypeHintRule),

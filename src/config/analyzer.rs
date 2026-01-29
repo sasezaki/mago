@@ -1,4 +1,3 @@
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use clap::ColorChoice;
@@ -7,6 +6,7 @@ use mago_algebra::DEFAULT_DISJUNCTION_COMPLEXITY;
 use mago_algebra::DEFAULT_NEGATION_COMPLEXITY;
 use mago_algebra::DEFAULT_SATURATION_COMPLEXITY;
 use mago_analyzer::settings::DEFAULT_FORMULA_SIZE_THRESHOLD;
+use mago_analyzer::settings::DEFAULT_STRING_CONCAT_COMBINATION_THRESHOLD;
 use mago_analyzer::settings::Settings;
 use mago_atom::ascii_lowercase_atom;
 use mago_atom::atom;
@@ -15,6 +15,8 @@ use mago_reporting::baseline::BaselineVariant;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::utils::should_use_colors;
 
 /// Configuration options for the static analyzer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -261,6 +263,14 @@ pub struct PerformanceConfiguration {
     ///
     /// Defaults to `512`.
     pub formula_size_threshold: u16,
+
+    /// Maximum number of combinations to track during string concatenation.
+    ///
+    /// Limits the number of possible string literal combinations to prevent
+    /// exponential blowup in large concatenation chains.
+    ///
+    /// Defaults to `4096`.
+    pub string_concat_combination_threshold: u16,
 }
 
 impl Default for PerformanceConfiguration {
@@ -271,6 +281,7 @@ impl Default for PerformanceConfiguration {
             negation_complexity_threshold: DEFAULT_NEGATION_COMPLEXITY,
             consensus_limit_threshold: DEFAULT_CONSENSUS_LIMIT,
             formula_size_threshold: DEFAULT_FORMULA_SIZE_THRESHOLD,
+            string_concat_combination_threshold: DEFAULT_STRING_CONCAT_COMBINATION_THRESHOLD,
         }
     }
 }
@@ -299,11 +310,7 @@ impl AnalyzerConfiguration {
             check_closure_missing_type_hints: self.check_closure_missing_type_hints,
             check_arrow_function_missing_type_hints: self.check_arrow_function_missing_type_hints,
             register_super_globals: self.register_super_globals,
-            use_colors: match color_choice {
-                ColorChoice::Always => true,
-                ColorChoice::Never => false,
-                ColorChoice::Auto => std::io::stdout().is_terminal(),
-            },
+            use_colors: should_use_colors(color_choice),
             diff: enable_diff,
             trust_existence_checks: self.trust_existence_checks,
             class_initializers: self.class_initializers.iter().map(|s| ascii_lowercase_atom(s.as_str())).collect(),
@@ -314,6 +321,7 @@ impl AnalyzerConfiguration {
             negation_complexity_threshold: self.performance.negation_complexity_threshold,
             consensus_limit_threshold: self.performance.consensus_limit_threshold,
             formula_size_threshold: self.performance.formula_size_threshold,
+            string_concat_combination_threshold: self.performance.string_concat_combination_threshold,
         }
     }
 }

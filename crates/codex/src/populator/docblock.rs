@@ -96,6 +96,22 @@ fn should_inherit_docblock_type(
     };
 
     if covariant {
+        if let Some(parent_docblock) = parent_docblock {
+            let child_contained_in_parent_docblock = union_comparator::is_contained_by(
+                codebase,
+                child_native,
+                &parent_docblock.type_union,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            );
+
+            if child_contained_in_parent_docblock {
+                return false;
+            }
+        }
+
         let child_contained_in_parent = union_comparator::is_contained_by(
             codebase,
             child_native,
@@ -116,7 +132,31 @@ fn should_inherit_docblock_type(
             &mut ComparisonResult::new(),
         ) && child_contained_in_parent;
 
-        types_equal || !child_contained_in_parent
+        if types_equal || !child_contained_in_parent {
+            return true;
+        }
+
+        if let Some(parent_docblock) = parent_docblock {
+            let docblock_type = if !child_native.accepts_null() && parent_docblock.type_union.has_null() {
+                parent_docblock.type_union.to_non_nullable()
+            } else {
+                parent_docblock.type_union.clone()
+            };
+
+            let docblock_compatible_with_child = union_comparator::is_contained_by(
+                codebase,
+                &docblock_type,
+                child_native,
+                false,
+                false,
+                false,
+                &mut ComparisonResult::new(),
+            );
+
+            return docblock_compatible_with_child;
+        }
+
+        false
     } else {
         let parent_contained_in_child = union_comparator::is_contained_by(
             codebase,
@@ -155,16 +195,6 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
 
     for (class_name, class_metadata) in &codebase.class_likes {
         for (method_name, method_ids) in &class_metadata.overridden_method_ids {
-            let child_method_id = (*class_name, *method_name);
-
-            let Some(child_method) = codebase.function_likes.get(&child_method_id) else {
-                continue;
-            };
-
-            if !child_method.needs_docblock_inheritance() {
-                continue;
-            }
-
             let mut parent_method_id = None;
 
             if let Some(parent_class) = &class_metadata.direct_parent_class
@@ -216,6 +246,7 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
         };
 
         let parent_return_type = parent_method.return_type_metadata.as_ref();
+        let parent_native_return_type = parent_method.return_type_declaration_metadata.as_ref();
         let parent_parameters = &parent_method.parameters;
         let parent_template_types = &parent_method.template_types;
         let parent_thrown_types = &parent_method.thrown_types;
@@ -246,12 +277,12 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
             if let Some(ref template_result) = template_result {
                 return_type = inferred_type_replacer::replace(&return_type, template_result, codebase);
             }
-            Some((return_type, parent_return.span))
+            Some((return_type, parent_return.span, parent_return.from_docblock))
         } else {
             None
         };
 
-        let substituted_param_types: Vec<Option<(TUnion, Span)>> = parent_parameters
+        let substituted_param_types: Vec<Option<(TUnion, Span, bool)>> = parent_parameters
             .iter()
             .map(|parent_param| {
                 if let Some(parent_param_type) = parent_param.type_metadata.as_ref() {
@@ -259,7 +290,7 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
                     if let Some(ref template_result) = template_result {
                         param_type = inferred_type_replacer::replace(&param_type, template_result, codebase);
                     }
-                    Some((param_type, parent_param_type.span))
+                    Some((param_type, parent_param_type.span, parent_param_type.from_docblock))
                 } else {
                     None
                 }
@@ -294,7 +325,7 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
             let has_explicit_inherit_doc = child_method.flags.contains(MetadataFlags::INHERITS_DOCS);
 
             let should_inherit_return = should_inherit_docblock_type(
-                parent_return_type.filter(|m| !m.from_docblock).map(|m| &m.type_union),
+                parent_native_return_type.map(|m| &m.type_union),
                 parent_return_type.filter(|m| m.from_docblock),
                 child_method.return_type_declaration_metadata.as_ref().map(|m| &m.type_union),
                 child_method.return_type_metadata.as_ref().filter(|m| m.from_docblock),
@@ -374,16 +405,30 @@ pub fn inherit_method_docblocks(codebase: &mut CodebaseMetadata) {
             continue;
         };
 
-        if should_inherit_return && let Some((type_union, span)) = substituted_return_type {
-            child_method.return_type_metadata = Some(TypeMetadata::from_docblock(type_union, span));
+        if should_inherit_return && let Some((type_union, span, from_docblock)) = substituted_return_type {
+            // Narrow the inherited docblock type based on child's native return type.
+            // If child's native type is non-nullable, remove null from the inherited type.
+            // Example: Parent has `@return T|null` with `:?object`, child has `:object`
+            //          After template substitution: `stdClass|null` -> narrowed to `stdClass`
+            let narrowed_type = if let Some(child_native_return) = &child_method.return_type_declaration_metadata
+                && !child_native_return.type_union.accepts_null()
+                && type_union.has_null()
+            {
+                type_union.to_non_nullable()
+            } else {
+                type_union
+            };
+
+            child_method.return_type_metadata =
+                Some(TypeMetadata { type_union: narrowed_type, span, from_docblock, inferred: false });
         }
 
         for (i, substituted_param) in substituted_param_types.into_iter().enumerate() {
             if let Some(true) = params_to_inherit.get(i).copied()
                 && let Some(child_param) = child_method.parameters.get_mut(i)
-                && let Some((type_union, span)) = substituted_param
+                && let Some((type_union, span, from_docblock)) = substituted_param
             {
-                child_param.type_metadata = Some(TypeMetadata::from_docblock(type_union, span));
+                child_param.type_metadata = Some(TypeMetadata { type_union, span, from_docblock, inferred: false });
             }
         }
 
